@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Run the whole suite: Python for keychron-ctl, node for Model.js.
+set -uo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+status=0
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -t tests -p 'test_*.py' "$@" || status=1
+node --test tests/model.test.mjs || status=1
+exit "$status"

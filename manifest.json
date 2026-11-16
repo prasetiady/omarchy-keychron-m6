@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "id": "keychron-m6.panel",
+  "name": "Keychron M6 Panel",
+  "version": "0.1.0",
+  "author": "prasetiady",
+  "license": "MIT",
+  "description": "Battery level and live configuration for a Keychron M6 mouse over the 2.4 GHz receiver, USB cable, or Bluetooth.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Keychron M6",
+    "description": "Mouse battery, DPI, polling rate, buttons, and pointer acceleration. Mouse settings are written to the mouse's onboard memory.",
+    "category": "System",
+    "aliases": [
+      "mouse",
+      "keychron",
+      "m6",
+      "battery"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "showPercentage": true,
+      "lowBatteryThreshold": 15,
+      "refreshIntervalSec": 300
+    },
+    "schema": [
+      {
+        "key": "showPercentage",
+        "type": "boolean",
+        "label": "Show battery percentage in bar",
+        "defaultValue": true,
+        "description": "Right-clicking the bar icon toggles this too."
+      },
+      {
+        "key": "lowBatteryThreshold",
+        "type": "integer",
+        "label": "Low battery threshold (%)",
+        "min": 5,
+        "max": 50,
+        "step": 5,
+        "defaultValue": 15
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Background refresh (seconds)",
+        "min": 60,
+        "max": 3600,
+        "step": 60,
+        "defaultValue": 300,
+        "description": "How often the battery is read while the panel is closed."
+      }
+    ]
+  }
+}

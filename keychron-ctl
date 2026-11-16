@@ -1,0 +1,920 @@
+#!/usr/bin/env python3
+"""Talk to a Keychron M6 over its vendor HID protocol.
+
+The Keychron Launcher calls this protocol "8k" (the family name, not the polling
+rate). It runs on usage page 0xFFC1: output report 0xB3 carries 63-byte
+commands, 0xB5 carries 20-byte commands, and replies come back on 0xB4/0xB6.
+The receiver (Link-KM, Ultra-Link) forwards the same frames to the mouse, so
+one code path covers the cable, the 2.4 GHz receiver and, when the BLE HID map
+exposes the page, Bluetooth.
+
+Output is one `key=value` per line so the bar widget can parse it with a plain
+split. Every value is numeric or from a fixed vocabulary, except the UPower
+model name, which is sanitized and capped.
+
+Usage:
+  keychron-ctl status
+  keychron-ctl set <setting> <value>
+  keychron-ctl buttons get
+  keychron-ctl buttons set <index> <action> [<argument>]
+  keychron-ctl reset
+  keychron-ctl probe
+"""
+
+import errno
+import fcntl
+import json
+import os
+import re
+import select
+import subprocess
+import sys
+import time
+
+VENDOR = 0x3434
+MOUSE_PIDS = {0xD064}  # Keychron M6 (1K edition)
+VENDOR_PAGE = bytes([0x06, 0xC1, 0xFF])  # Usage Page (Vendor 0xFFC1)
+
+REPORT_LONG = 0xB3   # 63-byte payload
+REPORT_SHORT = 0xB5  # 20-byte payload
+REPLY_IDS = (0xB4, 0xB6)
+LONG_LEN = 63
+SHORT_LEN = 20
+
+OP_INFO = 0x02
+OP_SNAPSHOT = 0x06
+OP_SLEEP = 0x0A
+OP_RESET = 0x0F
+OP_KEY_SET = 0x52  # default layer; the Fn layer uses 0x56
+OP_KEY_GET = 0x62
+OP_DPI = 0x40
+OP_RATE = 0x41
+OP_SENSOR = 0x42
+OP_DEBOUNCE = 0x43
+OP_ACK = 0xE4
+
+# Polling rate codes, as indexed by the Launcher (`rateValues`).
+RATE_CODES = [125, 500, 1000, 2000, 4000, 8000, 250]
+
+DPI_MIN = 50
+DPI_MAX = 12000
+DPI_LEVELS = 5
+
+BUS_USB = 0x0003
+BUS_BLUETOOTH = 0x0005
+
+SYSFS = os.environ.get("KEYCHRON_SYSFS", "/sys/class/hidraw")
+DEVDIR = os.environ.get("KEYCHRON_DEVDIR", "/dev")
+STATE_DIR = os.environ.get(
+    "KEYCHRON_STATE_DIR",
+    os.path.join(os.path.expanduser("~"), ".local", "state", "keychron-m6"),
+)
+TIMEOUT = float(os.environ.get("KEYCHRON_TIMEOUT", "1.0"))
+RETRIES = 2
+
+DEFAULT_HYPR_NAMES = ["keychron-keychron-m6", "keychron--keychron-link-km"]
+HYPR_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9:._-]{0,127}$")
+HYPR_MOUSE_RE = re.compile(r"keychron.*(m6|link)")
+
+MAX_DESCRIPTOR = 4096
+MAX_UEVENT = 4096
+MAX_TEXT = 65536
+
+
+class AccessDenied(Exception):
+    pass
+
+
+class NoReply(Exception):
+    pass
+
+
+# ---------------------------------------------------------------- discovery
+
+class Node:
+    def __init__(self, name, bus, vid, pid, kind):
+        self.name = name
+        self.bus = bus
+        self.vid = vid
+        self.pid = pid
+        self.kind = kind
+
+    @property
+    def path(self):
+        return os.path.join(DEVDIR, self.name)
+
+
+def _read(path, limit, binary=False):
+    with open(path, "rb") as f:
+        data = f.read(limit)
+    return data if binary else data.decode("utf-8", "replace")
+
+
+def parse_hid_id(uevent):
+    """HID_ID=0003:00003434:0000D064 -> (bus, vendor, product)."""
+    for line in uevent.splitlines():
+        if line.startswith("HID_ID="):
+            parts = line[7:].split(":")
+            if len(parts) == 3:
+                try:
+                    return tuple(int(p, 16) for p in parts)
+                except ValueError:
+                    return None
+    return None
+
+
+def classify(bus, pid):
+    if bus == BUS_BLUETOOTH:
+        return "bluetooth"
+    if pid in MOUSE_PIDS:
+        return "usb"
+    return "receiver"
+
+
+KIND_ORDER = {"usb": 0, "receiver": 1, "bluetooth": 2}
+
+
+def find_nodes(sysfs=None):
+    """Keychron hidraw nodes that carry the vendor page, best path first.
+
+    The cable wins over the receiver because only the wired path reports the
+    charging bit reliably. Receiver PIDs are not hardcoded: the Link-KM shows
+    up as d026 or d029 depending on the port, and any Keychron node with the
+    vendor page that is not the mouse itself is treated as a receiver.
+    """
+    root = sysfs or SYSFS
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+    nodes = []
+    for name in names:
+        if not name.startswith("hidraw"):
+            continue
+        dev = os.path.join(root, name, "device")
+        try:
+            ident = parse_hid_id(_read(os.path.join(dev, "uevent"), MAX_UEVENT))
+            desc = _read(os.path.join(dev, "report_descriptor"), MAX_DESCRIPTOR, binary=True)
+        except OSError:
+            continue
+        if not ident:
+            continue
+        bus, vid, pid = ident
+        if vid != VENDOR or VENDOR_PAGE not in desc:
+            continue
+        nodes.append(Node(name, bus, vid, pid, classify(bus, pid)))
+    nodes.sort(key=lambda n: (KIND_ORDER[n.kind], n.name))
+    return nodes
+
+
+def any_keychron_bluetooth(sysfs=None):
+    """True when the M6 is paired over Bluetooth without the vendor page."""
+    root = sysfs or SYSFS
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return False
+    for name in names:
+        try:
+            ident = parse_hid_id(_read(os.path.join(root, name, "device", "uevent"), MAX_UEVENT))
+        except OSError:
+            continue
+        if ident and ident[0] == BUS_BLUETOOTH and ident[1] == VENDOR:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------- transport
+
+class Device:
+    """One open hidraw node. Commands are strictly one at a time."""
+
+    def __init__(self, node):
+        self.node = node
+        try:
+            self.fd = os.open(node.path, os.O_RDWR | os.O_NONBLOCK)
+        except PermissionError as e:
+            raise AccessDenied(node.path) from e
+
+    def close(self):
+        os.close(self.fd)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def drain(self):
+        while True:
+            try:
+                if not os.read(self.fd, 64):
+                    return
+            except BlockingIOError:
+                return
+            except OSError:
+                return
+
+    def send(self, report_id, payload):
+        size = LONG_LEN if report_id == REPORT_LONG else SHORT_LEN
+        body = bytes(payload[:size]).ljust(size, b"\0")
+        os.write(self.fd, bytes([report_id]) + body)
+
+    def replies(self, timeout):
+        """Yield vendor reply bodies (report id stripped) until timeout."""
+        deadline = time.monotonic() + timeout
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return
+            ready, _, _ = select.select([self.fd], [], [], left)
+            if not ready:
+                return
+            try:
+                data = os.read(self.fd, 64)
+            except BlockingIOError:
+                continue
+            except OSError as e:
+                if e.errno in (errno.ENODEV, errno.EIO):
+                    return
+                raise
+            if data and data[0] in REPLY_IDS:
+                yield data[1:]
+
+    def request(self, report_id, payload, match, timeout=None, retries=RETRIES):
+        """Send a command and return the first reply that `match` accepts.
+
+        A stale reply to an earlier command can look valid, so every caller
+        matches on the echoed opcode (and the slot index where there is one).
+        """
+        for _ in range(retries + 1):
+            self.drain()
+            self.send(report_id, payload)
+            for body in self.replies(timeout or TIMEOUT):
+                if match(body):
+                    return body
+        raise NoReply(payload[0])
+
+    def command(self, report_id, payload, timeout=None):
+        """Send a write and wait for its acknowledgement (or its echo)."""
+        op = payload[0]
+
+        def acked(b):
+            return (len(b) > 2 and b[0] == OP_ACK and b[2] == op) or (len(b) > 0 and b[0] == op)
+
+        body = self.request(report_id, payload, acked, timeout=timeout)
+        if body[0] == OP_ACK and body[1] not in (0, 1):
+            raise NoReply(op)
+        return body
+
+
+def lock():
+    """Serialize every caller: the receiver answers one command at a time."""
+    run = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    fd = os.open(os.path.join(run, "keychron-m6.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+# ---------------------------------------------------------------- protocol
+
+def le16(b, i):
+    return b[i] | (b[i + 1] << 8)
+
+
+def parse_snapshot(b):
+    """Decode the opcode 0x06 reply (offsets from the opcode echo).
+
+    Layout taken from the Launcher's own parser for the "8k" protocol.
+    """
+    if len(b) < 62 or b[0] != OP_SNAPSHOT:
+        return None
+    rate_count = b[49] or 6
+    rate_codes = list(b[43:49])[:rate_count]
+    return {
+        "profile": b[1],
+        "slots": [b[2], b[3], b[4]],
+        "dpi_levels": [le16(b, 5 + 2 * i) for i in range(DPI_LEVELS)],
+        "sensor_byte": b[15],
+        "dpi_count": b[16],
+        "debounce": b[17],
+        "sleep": b[18],
+        "battery": b[19] & 0x7F,
+        "charging": bool(b[19] & 0x80),
+        "feature1": b[26],
+        "dpi_max": le16(b, 40),
+        "dpi_step": b[42] or 50,
+        "rate_codes": rate_codes,
+        "rate_count": rate_count,
+        "fps20k": b[52] & 1,
+        "feature2": b[53],
+        "lod_byte": b[61],
+    }
+
+
+def parse_info(b):
+    """Decode the opcode 0x02 reply: protocol version, VID/PID, work mode."""
+    if len(b) < 16 or b[0] != OP_INFO:
+        return None
+    return {
+        "version": le16(b, 1),
+        "vid": le16(b, 3),
+        "pid": le16(b, 5),
+        "firmware": "%d.%d.%d" % (b[8], (b[7] >> 4) & 15, b[7] & 15),
+        "work_mode": b[9] & 7,
+        "feature1": b[11],
+        "feature2": b[12],
+        "feature3": b[13],
+        "feature4": b[15],
+    }
+
+
+def sensor_bits(byte):
+    return {
+        "lod": byte & 3,
+        "ripple": (byte >> 2) & 1,
+        "angle-snap": (byte >> 3) & 1,
+        "motion-sync": (byte >> 4) & 1,
+        "scroll-reverse": (byte >> 6) & 1,
+    }
+
+
+def rate_hz(code):
+    return RATE_CODES[code] if 0 <= code < len(RATE_CODES) else None
+
+
+def slot_for(snap, info):
+    """The per-mode slot (low nibble DPI level, high nibble rate level)."""
+    slots = snap["slots"]
+    mode = info["work_mode"] if info and info["work_mode"] < 3 else None
+    if mode is not None:
+        return slots[mode]
+    # Without the work mode, the slots agree whenever the panel wrote them,
+    # because every DPI and rate write sets all three to the same level.
+    return slots[0]
+
+
+def get_snapshot(dev):
+    body = dev.request(REPORT_LONG, [OP_SNAPSHOT], lambda b: len(b) > 0 and b[0] == OP_SNAPSHOT)
+    snap = parse_snapshot(body)
+    if not snap:
+        raise NoReply(OP_SNAPSHOT)
+    return snap
+
+
+def get_info(dev):
+    try:
+        body = dev.request(REPORT_SHORT, [OP_INFO], lambda b: len(b) > 0 and b[0] == OP_INFO, retries=0)
+    except NoReply:
+        return None
+    return parse_info(body)
+
+
+# ---------------------------------------------------------------- state files
+
+def state_path(name):
+    return os.path.join(STATE_DIR, name)
+
+
+def read_accel():
+    try:
+        word = _read(state_path("accel-profile"), 32).strip()
+    except OSError:
+        return "default"
+    return word if word in ("flat", "adaptive") else "default"
+
+
+def hypr_mouse_names():
+    try:
+        out = subprocess.run(
+            ["hyprctl", "devices", "-j"], capture_output=True, timeout=5, check=False
+        ).stdout[:MAX_TEXT * 4]
+        mice = json.loads(out.decode("utf-8", "replace")).get("mice", [])
+    except (OSError, ValueError, subprocess.SubprocessError, AttributeError):
+        return []
+    names = []
+    for m in mice[:64]:
+        name = str(m.get("name", "")) if isinstance(m, dict) else ""
+        if HYPR_NAME_RE.match(name) and HYPR_MOUSE_RE.search(name) and "keyboard" not in name:
+            names.append(name)
+    return names
+
+
+def write_accel(value):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    if value == "default":
+        for name in ("accel-profile",):
+            try:
+                os.remove(state_path(name))
+            except FileNotFoundError:
+                pass
+    else:
+        names = []
+        try:
+            names = _read(state_path("device-names"), 8192).split()
+        except OSError:
+            pass
+        for n in DEFAULT_HYPR_NAMES + hypr_mouse_names():
+            if HYPR_NAME_RE.match(n) and n not in names:
+                names.append(n)
+        _atomic_write(state_path("device-names"), "\n".join(names[:32]) + "\n")
+        _atomic_write(state_path("accel-profile"), value + "\n")
+    subprocess.run(["hyprctl", "reload"], capture_output=True, timeout=10, check=False)
+
+
+def _atomic_write(path, text):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+# ---------------------------------------------------------------- UPower (Bluetooth)
+
+def upower_battery():
+    """Battery of a Bluetooth-paired M6 as UPower sees it, or None."""
+    try:
+        paths = subprocess.run(
+            ["upower", "-e"], capture_output=True, timeout=5, check=False
+        ).stdout.decode("utf-8", "replace")[:MAX_TEXT]
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for path in paths.splitlines()[:64]:
+        if "mouse" not in path and "keychron" not in path.lower():
+            continue
+        try:
+            info = subprocess.run(
+                ["upower", "-i", path.strip()], capture_output=True, timeout=5, check=False
+            ).stdout.decode("utf-8", "replace")[:MAX_TEXT]
+        except (OSError, subprocess.SubprocessError):
+            continue
+        model = re.search(r"model:\s+(.+)", info)
+        pct = re.search(r"percentage:\s+(\d+)%", info)
+        state = re.search(r"state:\s+([a-z-]+)", info)
+        if not model or not pct or "m6" not in model.group(1).lower():
+            continue
+        return {
+            "battery": max(0, min(100, int(pct.group(1)))),
+            "charging": bool(state and state.group(1) in ("charging", "fully-charged")),
+        }
+    return None
+
+
+# ---------------------------------------------------------------- commands
+
+def emit(pairs):
+    for k, v in pairs:
+        if isinstance(v, bool):
+            v = "true" if v else "false"
+        elif isinstance(v, (list, tuple)):
+            v = ",".join(str(x) for x in v)
+        print("%s=%s" % (k, v))
+
+
+def snapshot_pairs(snap, info):
+    slot = slot_for(snap, info)
+    dpi_active = slot & 15
+    rate_level = (slot >> 4) & 15
+    codes = snap["rate_codes"]
+    rate = rate_hz(codes[rate_level]) if rate_level < len(codes) else None
+    sensor = sensor_bits(snap["sensor_byte"])
+    pairs = [
+        ("battery", snap["battery"]),
+        ("charging", snap["charging"]),
+        ("profile", snap["profile"]),
+        ("dpi-levels", snap["dpi_levels"]),
+        ("dpi-count", snap["dpi_count"]),
+        ("dpi-active", dpi_active),
+        ("dpi-max", min(snap["dpi_max"] or DPI_MAX, DPI_MAX)),
+        ("dpi-step", snap["dpi_step"]),
+        ("rate", rate if rate else ""),
+        ("rate-options", [rate_hz(c) for c in codes if rate_hz(c)]),
+        ("ripple", sensor["ripple"]),
+        ("angle-snap", sensor["angle-snap"]),
+        ("motion-sync", sensor["motion-sync"]),
+        ("scroll-reverse", sensor["scroll-reverse"]),
+        ("debounce", snap["debounce"]),
+        ("sleep", snap["sleep"]),
+    ]
+    if info:
+        pairs += [("firmware", info["firmware"]), ("work-mode", info["work_mode"])]
+    return pairs
+
+
+def cmd_status():
+    pairs = [("accel", read_accel())]
+    nodes = find_nodes()
+    denied = False
+    for node in nodes:
+        try:
+            with Device(node) as dev:
+                try:
+                    snap = get_snapshot(dev)
+                except NoReply:
+                    if node.kind == "receiver":
+                        # The receiver is there but the mouse did not answer:
+                        # it is asleep or out of range, not disconnected.
+                        emit([("present", True), ("access", "ok"), ("connection", node.kind),
+                              ("link", "asleep")] + pairs)
+                        return 0
+                    continue
+                info = get_info(dev)
+        except AccessDenied:
+            denied = True
+            continue
+        except OSError:
+            continue
+        emit([("present", True), ("access", "ok"), ("connection", node.kind), ("link", "ok"),
+              ("settings", True)] + snapshot_pairs(snap, info) + pairs)
+        return 0
+
+    if any_keychron_bluetooth():
+        bat = upower_battery()
+        out = [("present", True), ("access", "denied" if denied else "ok"),
+               ("connection", "bluetooth"), ("link", "ok"), ("settings", False)]
+        if bat:
+            out += [("battery", bat["battery"]), ("charging", bat["charging"])]
+        emit(out + pairs)
+        return 0
+
+    emit([("present", False), ("access", "denied" if denied else "ok")] + pairs)
+    return 0
+
+
+def open_mouse():
+    """First node whose mouse answers a snapshot, as (Device, snapshot)."""
+    denied = False
+    for node in find_nodes():
+        try:
+            dev = Device(node)
+        except AccessDenied:
+            denied = True
+            continue
+        try:
+            return dev, get_snapshot(dev)
+        except (NoReply, OSError):
+            dev.close()
+    if denied:
+        raise AccessDenied("no permission on the Keychron hidraw node")
+    raise NoReply(OP_SNAPSHOT)
+
+
+def parse_int(value, lo, hi, name):
+    try:
+        n = int(value, 10)
+    except ValueError:
+        raise SystemExit("keychron-ctl: %s must be a number" % name)
+    if not lo <= n <= hi:
+        raise SystemExit("keychron-ctl: %s must be %d..%d" % (name, lo, hi))
+    return n
+
+
+def snap_dpi(n, step=50):
+    n = int(round(n / step)) * step
+    return max(DPI_MIN, min(DPI_MAX, n))
+
+
+def dpi_payload(level, levels, count):
+    p = [OP_DPI, level, level, level]
+    for v in levels:
+        p += [v & 0xFF, (v >> 8) & 0xFF]
+    p.append(count)
+    return p
+
+
+def rate_payload(level, codes):
+    p = [OP_RATE, level, level] + (list(codes) + [0] * 6)[:6] + [len(codes)]
+    return p
+
+
+def sensor_payload(snap, overrides):
+    bits = sensor_bits(snap["sensor_byte"])
+    bits.update(overrides)
+    on_off = lambda v: 1 if v else 2  # noqa: E731 - the protocol's on/off encoding
+    p = [0] * 12
+    p[0] = OP_SENSOR
+    p[1] = bits["lod"]
+    p[2] = on_off(bits["ripple"])
+    p[3] = on_off(bits["angle-snap"])
+    p[4] = on_off(bits["motion-sync"])
+    p[6] = bits["scroll-reverse"] + 1
+    p[8] = snap["fps20k"] + 1
+    p[11] = snap["lod_byte"] & 15
+    return p
+
+
+def cmd_set(key, value):
+    if key == "accel":
+        if value not in ("flat", "adaptive", "default"):
+            raise SystemExit("keychron-ctl: accel must be flat, adaptive or default")
+        write_accel(value)
+        return 0
+
+    dev, snap = open_mouse()
+    with dev:
+        info = get_info(dev)
+        slot = slot_for(snap, info)
+        level = slot & 15
+        levels = list(snap["dpi_levels"])
+        count = snap["dpi_count"] or DPI_LEVELS
+
+        if key == "dpi-active":
+            level = parse_int(value, 0, count - 1, "dpi-active")
+            dev.command(REPORT_SHORT, dpi_payload(level, levels, count))
+        elif key == "dpi-levels":
+            parts = value.split(",")
+            if len(parts) != DPI_LEVELS:
+                raise SystemExit("keychron-ctl: dpi-levels needs %d values" % DPI_LEVELS)
+            levels = [snap_dpi(parse_int(p.strip(), 1, 100000, "dpi"), snap["dpi_step"]) for p in parts]
+            dev.command(REPORT_SHORT, dpi_payload(level, levels, count))
+        elif key == "dpi":
+            # Set the value of the active level only.
+            levels[level] = snap_dpi(parse_int(value, 1, 100000, "dpi"), snap["dpi_step"])
+            dev.command(REPORT_SHORT, dpi_payload(level, levels, count))
+        elif key == "rate":
+            hz = parse_int(value, 1, 8000, "rate")
+            codes = snap["rate_codes"]
+            if hz not in RATE_CODES or RATE_CODES.index(hz) not in codes:
+                raise SystemExit("keychron-ctl: rate must be one of %s" %
+                                 ", ".join(str(rate_hz(c)) for c in codes if rate_hz(c)))
+            dev.command(REPORT_SHORT, rate_payload(codes.index(RATE_CODES.index(hz)), codes))
+        elif key in ("ripple", "angle-snap", "motion-sync", "scroll-reverse"):
+            if value not in ("on", "off", "true", "false", "1", "0"):
+                raise SystemExit("keychron-ctl: %s must be on or off" % key)
+            on = value in ("on", "true", "1")
+            dev.command(REPORT_SHORT, sensor_payload(snap, {key: 1 if on else 0}))
+        elif key == "debounce":
+            dev.command(REPORT_SHORT, [OP_DEBOUNCE, parse_int(value, 0, 30, "debounce")])
+        elif key == "sleep":
+            dev.command(REPORT_SHORT, [OP_SLEEP, 1, parse_int(value, 1, 240, "sleep")])
+        else:
+            raise SystemExit("keychron-ctl: unknown setting %r" % key)
+    return 0
+
+
+# ---------------------------------------------------------------- buttons
+
+# Indexes from the Launcher's definition of the M6 (vendor_product_id 875876452).
+BUTTONS = [
+    (1, "Middle", "Clicking the scroll wheel."),
+    (2, "Right", "The right main button."),
+    (3, "Back", "The rear side button, under your thumb."),
+    (4, "Forward", "The front side button, under your thumb."),
+    (9, "Wheel tilt left", "Pushing the scroll wheel to the left."),
+    (8, "Wheel tilt right", "Pushing the scroll wheel to the right."),
+    (14, "Wheel up", "Scrolling the main wheel up, one notch."),
+    (13, "Wheel down", "Scrolling the main wheel down, one notch."),
+    (11, "Thumb wheel left", "Turning the side thumb wheel towards the back."),
+    (10, "Thumb wheel right", "Turning the side thumb wheel towards the front."),
+]
+# Left click (index 0) is never offered, so you cannot lock yourself out.
+BUTTON_INDEXES = {b[0] for b in BUTTONS}
+
+KIND_DEFAULT = 0
+KIND_MOUSE = 1
+KIND_KEYBOARD = 2
+KIND_MEDIA = 3
+KIND_DPI = 5
+KIND_DISABLE = 9
+KIND_RATE = 13
+
+# Mouse functions: three bytes, high to low = [buttons, wheel, horizontal wheel].
+MOUSE_FUNCS = {
+    "left": [0x01, 0, 0], "right": [0x02, 0, 0], "middle": [0x04, 0, 0],
+    "back": [0x08, 0, 0], "forward": [0x10, 0, 0],
+    "scroll-up": [0, 0x02, 0], "scroll-down": [0, 0xFE, 0],
+    "scroll-left": [0, 0, 0xFE], "scroll-right": [0, 0, 0x02],
+}
+MEDIA_FUNCS = {
+    "volume-up": 233, "volume-down": 234, "mute": 226, "play-pause": 205,
+    "previous": 182, "next": 181, "stop": 183,
+}
+DPI_FUNCS = {"dpi-cycle": 1, "dpi-up": 2, "dpi-down": 3}
+
+MODIFIERS = {"ctrl": 1, "shift": 2, "alt": 4, "super": 8}
+# HID keyboard usage IDs for the keys a shortcut can end in.
+KEYCODES = {}
+for _i, _c in enumerate("abcdefghijklmnopqrstuvwxyz"):
+    KEYCODES[_c] = 4 + _i
+for _i, _c in enumerate("1234567890"):
+    KEYCODES[_c] = 30 + _i
+for _i in range(1, 13):
+    KEYCODES["f%d" % _i] = 57 + _i
+for _i in range(13, 25):
+    KEYCODES["f%d" % _i] = 104 + (_i - 13)
+KEYCODES.update({
+    "enter": 40, "escape": 41, "backspace": 42, "tab": 43, "space": 44,
+    "minus": 45, "equal": 46, "bracketleft": 47, "bracketright": 48,
+    "backslash": 49, "semicolon": 51, "apostrophe": 52, "grave": 53,
+    "comma": 54, "period": 55, "slash": 56, "print": 70, "pause": 72,
+    "insert": 73, "home": 74, "pageup": 75, "delete": 76, "end": 77,
+    "pagedown": 78, "right": 79, "left": 80, "down": 81, "up": 82,
+})
+KEYNAMES = {v: k for k, v in KEYCODES.items()}
+
+ACTION_LABELS = [
+    ("default", "Default"), ("disable", "Disabled"),
+    ("left", "Left click"), ("right", "Right click"), ("middle", "Middle click"),
+    ("back", "Back"), ("forward", "Forward"),
+    ("scroll-up", "Scroll up"), ("scroll-down", "Scroll down"),
+    ("scroll-left", "Scroll left"), ("scroll-right", "Scroll right"),
+    ("volume-up", "Volume up"), ("volume-down", "Volume down"), ("mute", "Mute"),
+    ("play-pause", "Play/pause"), ("previous", "Previous track"),
+    ("next", "Next track"), ("stop", "Stop"),
+    ("dpi-cycle", "DPI cycle"), ("dpi-up", "DPI up"), ("dpi-down", "DPI down"),
+    ("shortcut", "Keyboard shortcut"),
+]
+ACTIONS = [{"id": i, "label": l, "kind": "shortcut" if i == "shortcut" else "plain"}
+           for i, l in ACTION_LABELS]
+
+
+def parse_shortcut(text):
+    """'super+shift+f13' -> [modmask, keycode]."""
+    parts = [p.strip().lower() for p in text.split("+") if p.strip()]
+    if not parts or len(parts) > 5:
+        raise SystemExit("keychron-ctl: shortcut looks like super+shift+f13")
+    mask = 0
+    for p in parts[:-1]:
+        if p not in MODIFIERS:
+            raise SystemExit("keychron-ctl: unknown modifier %r" % p)
+        mask |= MODIFIERS[p]
+    if parts[-1] not in KEYCODES:
+        raise SystemExit("keychron-ctl: unknown key %r" % parts[-1])
+    return [mask, KEYCODES[parts[-1]]]
+
+
+def format_shortcut(mask, code):
+    mods = [name for name, bit in MODIFIERS.items() if mask & bit]
+    return "+".join(mods + [KEYNAMES.get(code, "0x%02x" % code)])
+
+
+def decode_key(kind, data):
+    """A button reply's function -> (action id, argument)."""
+    if kind == KIND_DEFAULT:
+        return "default", ""
+    if kind == KIND_DISABLE:
+        return "disable", ""
+    if kind == KIND_MOUSE:
+        for name, b in MOUSE_FUNCS.items():
+            if list(data[:3]) == b:
+                return name, ""
+    if kind == KIND_MEDIA:
+        code = data[0] | (data[1] << 8)
+        for name, c in MEDIA_FUNCS.items():
+            if c == code:
+                return name, ""
+    if kind == KIND_DPI:
+        for name, c in DPI_FUNCS.items():
+            if c == data[0]:
+                return name, ""
+    if kind == KIND_KEYBOARD:
+        return "shortcut", format_shortcut(data[0], data[1])
+    return "other", ""
+
+
+def encode_action(action, arg):
+    if action == "default":
+        return KIND_DEFAULT, []
+    if action == "disable":
+        return KIND_DISABLE, []
+    if action in MOUSE_FUNCS:
+        return KIND_MOUSE, MOUSE_FUNCS[action]
+    if action in MEDIA_FUNCS:
+        c = MEDIA_FUNCS[action]
+        return KIND_MEDIA, [c & 0xFF, (c >> 8) & 0xFF]
+    if action in DPI_FUNCS:
+        return KIND_DPI, [DPI_FUNCS[action], 0]
+    if action == "shortcut":
+        return KIND_KEYBOARD, parse_shortcut(arg or "")
+    raise SystemExit("keychron-ctl: unknown action %r" % action)
+
+
+def read_button(dev, index):
+    body = dev.request(
+        REPORT_LONG, [OP_KEY_GET, index],
+        lambda b: len(b) > 4 and b[0] == OP_KEY_GET and b[1] == index,
+    )
+    return decode_key(body[3], body[4:])
+
+
+def cmd_buttons_get():
+    out = {"buttons": [], "actions": ACTIONS}
+    try:
+        dev, _ = open_mouse()
+    except (NoReply, AccessDenied, OSError):
+        print(json.dumps(out))
+        return 0
+    with dev:
+        for index, name, help_text in BUTTONS:
+            try:
+                action, arg = read_button(dev, index)
+            except NoReply:
+                action, arg = "unknown", ""
+            out["buttons"].append({"index": index, "name": name, "help": help_text,
+                                   "action": action, "argument": arg})
+    print(json.dumps(out))
+    return 0
+
+
+def cmd_buttons_set(index, action, arg):
+    index = parse_int(index, 0, 31, "button index")
+    if index not in BUTTON_INDEXES:
+        raise SystemExit("keychron-ctl: button %d cannot be remapped" % index)
+    kind, data = encode_action(action, arg)
+    dev, _ = open_mouse()
+    with dev:
+        dev.command(REPORT_LONG, [OP_KEY_SET, index, 0, kind] + data)
+        got, got_arg = read_button(dev, index)
+    if got != action and not (action == "default" and got == "other"):
+        print("keychron-ctl: the mouse stored %s, not %s" % (got, action), file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_reset():
+    dev, _ = open_mouse()
+    with dev:
+        dev.command(REPORT_SHORT, [OP_RESET, 0xFF], timeout=3.0)
+    try:
+        write_accel("default")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return 0
+
+
+# ---------------------------------------------------------------- probe
+
+def hexdump(b):
+    return " ".join("%02x" % x for x in b)
+
+
+def cmd_probe():
+    nodes = find_nodes()
+    if not nodes:
+        print("no Keychron hidraw node with usage page 0xFFC1")
+        print("bluetooth node without vendor page: %s" % any_keychron_bluetooth())
+        print("upower: %s" % upower_battery())
+        return 1
+    for node in nodes:
+        print("== %s bus=%04x vid=%04x pid=%04x kind=%s" % (
+            node.name, node.bus, node.vid, node.pid, node.kind))
+        try:
+            dev = Device(node)
+        except AccessDenied:
+            print("   access denied: install 70-keychron-m6.rules")
+            continue
+        with dev:
+            probes = [
+                ("info 0xB5/02", REPORT_SHORT, [OP_INFO], OP_INFO),
+                ("bond 0xB5/03", REPORT_SHORT, [0x03], 0x03),
+                ("snapshot 0xB3/06", REPORT_LONG, [OP_SNAPSHOT], OP_SNAPSHOT),
+                ("sleep 0xB5/0A get", REPORT_SHORT, [OP_SLEEP, 2], OP_SLEEP),
+            ]
+            for idx, _, _ in BUTTONS[:3]:
+                probes.append(("key %d 0xB3/62" % idx, REPORT_LONG, [OP_KEY_GET, idx], OP_KEY_GET))
+            for label, rid, payload, op in probes:
+                try:
+                    body = dev.request(rid, payload, lambda b, op=op: len(b) > 0 and b[0] == op, retries=1)
+                    print("   %-18s %s" % (label, hexdump(body)))
+                except NoReply:
+                    print("   %-18s (no reply)" % label)
+            try:
+                snap = get_snapshot(dev)
+                info = get_info(dev)
+                for k, v in snapshot_pairs(snap, info):
+                    print("   %s=%s" % (k, ",".join(map(str, v)) if isinstance(v, list) else v))
+            except NoReply:
+                pass
+    return 0
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else "status"
+    lockfd = lock()
+    try:
+        if cmd == "status":
+            return cmd_status()
+        if cmd == "set" and len(argv) == 4:
+            return cmd_set(argv[2], argv[3])
+        if cmd == "buttons" and len(argv) == 3 and argv[2] == "get":
+            return cmd_buttons_get()
+        if cmd == "buttons" and len(argv) in (5, 6) and argv[2] == "set":
+            return cmd_buttons_set(argv[3], argv[4], argv[5] if len(argv) == 6 else "")
+        if cmd == "reset":
+            return cmd_reset()
+        if cmd == "probe":
+            return cmd_probe()
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    except AccessDenied:
+        print("keychron-ctl: no access to the mouse; install 70-keychron-m6.rules", file=sys.stderr)
+        return 3
+    except NoReply:
+        print("keychron-ctl: the mouse did not answer; move it to wake it", file=sys.stderr)
+        return 4
+    finally:
+        os.close(lockfd)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

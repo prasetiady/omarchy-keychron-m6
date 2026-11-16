@@ -1,0 +1,11 @@
+# Give the logged-in user access to Keychron HID raw nodes, so the
+# keychron-m6.panel widget can read battery and settings from the mouse.
+#
+# KERNELS matches the HID device name "<bus>:<vendor>:<product>.<n>", so one
+# rule covers the USB cable, the 2.4 GHz Link receiver, and Bluetooth.
+# uaccess grants access to the active seat only (no world-writable node).
+#
+# Install:
+#   sudo install -m 644 70-keychron-m6.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=hidraw
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="????:3434:*", TAG+="uaccess"
