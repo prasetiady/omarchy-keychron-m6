@@ -4,6 +4,10 @@ An [Omarchy](https://omarchy.org/) bar widget for the Keychron M6 mouse. It
 shows the battery in the bar and lets you change the mouse settings from a
 panel, without the Keychron Launcher web app.
 
+<p align="center">
+  <img src="preview.png" alt="The Keychron M6 panel open from the Omarchy bar, connected over 2.4 GHz at 97% battery, with the active DPI level, polling rate, Motion Sync, Angle Snapping, and Ripple Control toggles, Flat pointer acceleration, and the sleep and click debounce sliders" width="340">
+</p>
+
 Built and tested against a **Keychron M6 Ultra Silent (M6S-A72)**: PixArt 3311
 sensor, 1000 Hz, USB ID `3434:d064`. It works over all three connections:
 
