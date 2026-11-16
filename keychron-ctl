@@ -583,13 +583,19 @@ def cmd_status():
                         asleep = node
                     continue
                 info = get_info(dev)
+                try:
+                    step = read_hscroll(dev)
+                    # None means the thumb wheel is remapped to another action.
+                    extra = [("hscroll", step if step is not None else "custom")]
+                except NoReply:
+                    extra = []
         except AccessDenied:
             denied = True
             continue
         except OSError:
             continue
         emit([("present", True), ("access", "ok"), ("connection", node.kind), ("link", "ok"),
-              ("settings", True)] + snapshot_pairs(snap, info) + pairs)
+              ("settings", True)] + snapshot_pairs(snap, info) + extra + pairs)
         return 0
 
     if any_keychron_bluetooth():
@@ -703,6 +709,8 @@ def parse_setting(key, value):
         return parse_int(value, 0, 30, key)
     if key == "sleep":
         return parse_int(value, 1, 240, key)
+    if key == "hscroll":
+        return parse_int(value, 1, HSCROLL_MAX, key)
     raise SystemExit("keychron-ctl: unknown setting %r" % key)
 
 
@@ -757,6 +765,14 @@ def cmd_set(key, value):
 
     want = parse_setting(key, value)
     dev, snap = open_mouse()
+    if key == "hscroll":
+        with dev:
+            write_hscroll(dev, want)
+            got = read_hscroll(dev)
+        if got == want:
+            return 0
+        print("keychron-ctl: the thumb wheel stored %s, not %s" % (got or "custom", want), file=sys.stderr)
+        return 1
     with dev:
         info = get_info(dev)
         dev.command(REPORT_SHORT, setting_payload(key, want, snap, info))
@@ -875,6 +891,12 @@ def decode_key(kind, data):
         for name, b in MOUSE_FUNCS.items():
             if list(data[:3]) == b:
                 return name, ""
+        # A scroll action with a step size other than the named ones, such as
+        # the thumb wheel speed: the argument is the step per notch.
+        if data[0] == 0 and (data[1] == 0) != (data[2] == 0):
+            if data[2]:
+                return ("scroll-right" if data[2] < 128 else "scroll-left"), str(signed(data[2]))
+            return ("scroll-up" if data[1] < 128 else "scroll-down"), str(signed(data[1]))
     if kind == KIND_MEDIA:
         code = data[0] | (data[1] << 8)
         for name, c in MEDIA_FUNCS.items():
@@ -912,6 +934,47 @@ def read_button(dev, index):
         lambda b: len(b) > 4 and b[0] == OP_KEY_GET and b[1] == index,
     )
     return decode_key(body[3], body[4:])
+
+
+def signed(byte):
+    return abs(byte - 256 if byte > 127 else byte)
+
+
+# The thumb wheel is two buttons. Their default sends one horizontal step per
+# notch; a mouse action with a larger step makes it faster. The firmware takes
+# any step from 1 to 127 (checked on an M6S-A72: step 4 sends +-4 per report).
+THUMB_RIGHT = 10
+THUMB_LEFT = 11
+HSCROLL_MAX = 10
+
+
+def read_hscroll(dev):
+    """The thumb wheel's step per notch, or None when it is remapped."""
+    steps = []
+    for index, positive in ((THUMB_RIGHT, True), (THUMB_LEFT, False)):
+        body = dev.request(
+            REPORT_LONG, [OP_KEY_GET, index],
+            lambda b, index=index: len(b) > 6 and b[0] == OP_KEY_GET and b[1] == index,
+        )
+        kind, data = body[3], body[4:7]
+        if kind == KIND_DEFAULT:
+            steps.append(1)
+        elif kind == KIND_MOUSE and data[0] == 0 and data[1] == 0 and data[2]:
+            if (data[2] < 128) != positive:
+                return None
+            steps.append(signed(data[2]))
+        else:
+            return None
+    return steps[0] if steps[0] == steps[1] else None
+
+
+def write_hscroll(dev, step):
+    """Set both thumb wheel buttons; step 1 restores the factory mapping."""
+    for index, sign in ((THUMB_RIGHT, 1), (THUMB_LEFT, -1)):
+        if step == 1:
+            dev.command(REPORT_LONG, [OP_KEY_SET, index, 0, KIND_DEFAULT])
+        else:
+            dev.command(REPORT_LONG, [OP_KEY_SET, index, 0, KIND_MOUSE, 0, 0, (sign * step) & 0xFF])
 
 
 def cmd_buttons_get():

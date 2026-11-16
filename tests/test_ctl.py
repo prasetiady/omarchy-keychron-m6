@@ -234,6 +234,56 @@ class WriteTest(CtlTestCase):
             self.assertNotEqual(cm.exception.code, 0)
 
 
+class ThumbWheelTest(CtlTestCase):
+    """The thumb wheel speed is a scroll step stored on buttons 10 and 11."""
+
+    def mouse(self, buttons=None):
+        table = buttons if buttons is not None else {}
+
+        def handler(rid, payload):
+            op = payload[0]
+            if op == 0x03:
+                return [bond_reply()]
+            if op == 0x06:
+                return [[REPLY_LONG] + list(snapshot())]
+            if op == 0x62:
+                kind, data = table.get(payload[1], (0, [0, 0, 0]))
+                return [[REPLY_LONG, 0x62, payload[1], 0, kind] + data + [0] * 56]
+            if op == 0x52:
+                table[payload[1]] = (payload[3], list(payload[4:7]))
+                return [[REPLY_SHORT, 0xE4, 0, 0x52] + [0] * 17]
+            return []
+
+        self.add_node("hidraw8", 3, 0x3434, 0xD029)
+        self.attach(FakeMouse(handler))
+        return table
+
+    def test_set_writes_both_buttons_with_opposite_steps(self):
+        table = self.mouse()
+        self.assertEqual(run(self.ctl, "set", "hscroll", "4")[0], 0)
+        self.assertEqual(table, {10: (1, [0, 0, 4]), 11: (1, [0, 0, 0xFC])})
+        self.assertEqual(pairs(run(self.ctl, "status")[1])["hscroll"], "4")
+
+    def test_step_1_restores_the_factory_mapping(self):
+        table = self.mouse({10: (1, [0, 0, 4]), 11: (1, [0, 0, 0xFC])})
+        self.assertEqual(run(self.ctl, "set", "hscroll", "1")[0], 0)
+        self.assertEqual(table, {10: (0, [0, 0, 0]), 11: (0, [0, 0, 0])})
+
+    def test_a_remapped_thumb_wheel_reads_as_custom(self):
+        self.mouse({10: (2, [8, 104, 0]), 11: (0, [0, 0, 0])})
+        self.assertEqual(pairs(run(self.ctl, "status")[1])["hscroll"], "custom")
+
+    def test_range_is_checked_before_the_mouse(self):
+        for bad in ("0", "11", "x"):
+            with self.assertRaises(SystemExit):
+                self.ctl.parse_setting("hscroll", bad)
+
+    def test_buttons_decode_any_scroll_step(self):
+        self.assertEqual(self.ctl.decode_key(1, [0, 0, 4]), ("scroll-right", "4"))
+        self.assertEqual(self.ctl.decode_key(1, [0, 0, 0xFC]), ("scroll-left", "4"))
+        self.assertEqual(self.ctl.decode_key(1, [0, 0, 2]), ("scroll-right", ""))
+
+
 class StatusTest(CtlTestCase):
     def test_receiver_status(self):
         self.add_node("hidraw8", 3, 0x3434, 0xD029)

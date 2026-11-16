@@ -70,11 +70,18 @@ computer only.
 | Polling rate | 125, 500, or 1000 Hz |
 | Motion Sync, Angle Snapping, Ripple Control | On or off |
 | Pointer acceleration | System default, Flat, or Adaptive |
-| Scroll speed | 0.1× to 3.0× the normal speed, in steps of 0.1 |
+| Scroll speed | 0.1× to 3.0× the normal speed, in steps of 0.1. Applies to both wheels. |
+| Thumb wheel speed | 1× to 10× the default horizontal scroll per notch. Stored on the mouse. |
 | Sleep timer | 1 to 60 minutes in the panel |
 | Click debounce | 0 to 20 ms in the panel |
 | Buttons | Middle, right, back, forward, wheel tilt left and right, wheel up and down, and thumb wheel left and right. Left click can't be remapped, so a mistake can't lock you out. |
 | Factory reset | Restores the mouse's defaults. Click the button twice to confirm. |
+
+The thumb wheel speed is stored as the mapping of the two thumb wheel buttons,
+so it works on every computer. Hyprland's scroll speed multiplies it: with a
+scroll speed of 0.5× and a thumb wheel speed of 4×, the thumb wheel scrolls at
+2× while the main wheel scrolls at 0.5×. Remapping the thumb wheel under
+**Buttons** replaces the thumb wheel speed.
 
 Scrolling with the pointer over a slider scrolls the panel. To change a
 slider, drag it or click its track.
@@ -130,6 +137,7 @@ Settings for `set`:
 | `sleep` | `1` to `240` minutes |
 | `accel` | `flat`, `adaptive`, or `default` |
 | `scroll-speed` | `0.1` to `3.0`, or `default` |
+| `hscroll` | `1` to `10`, the thumb wheel's scroll step per notch. `1` restores the factory mapping. |
 
 Button indexes for `buttons set`: `1` middle, `2` right, `3` back, `4`
 forward, `9` wheel tilt left, `8` wheel tilt right, `14` wheel up, `13` wheel

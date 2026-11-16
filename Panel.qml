@@ -45,6 +45,9 @@ Panel {
   readonly property int dpiActive: Model.toInt(root.value("dpi-active"), 0)
   readonly property int dpiStep: Math.max(50, Model.toInt(root.status["dpi-step"], 50))
   readonly property int dpiMax: Model.toInt(root.status["dpi-max"], 12000)
+  // The thumb wheel's step per notch; 0 when it is remapped ("custom").
+  readonly property int hscroll: Model.toInt(root.value("hscroll"), 0)
+
   // Hyprland's scroll_factor for the mouse; 0 when no value is stored.
   readonly property real scrollSpeed: {
     var n = parseFloat(root.value("scroll-speed"))
@@ -79,7 +82,8 @@ Panel {
 
   function run(args, overlay) {
     if (overlay) root.pending = Object.assign({}, root.pending, overlay)
-    if (args[0] === "buttons" || args[0] === "reset") root.buttonsDirty = true
+    // The thumb wheel speed is stored as two button mappings.
+    if (args[0] === "buttons" || args[0] === "reset" || args[1] === "hscroll") root.buttonsDirty = true
     root.writeQueue = root.writeQueue.concat([args])
     root.drainQueue()
   }
@@ -471,6 +475,69 @@ Panel {
                 fontFamily: root.bar.fontFamily
                 onClicked: root.setValue(modelData.key, checked ? "0" : "1")
               }
+            }
+          }
+
+          // ---------- Thumb wheel speed (stored on the mouse) ----------
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+            visible: root.status.hscroll !== undefined
+            enabled: root.canConfigure
+            opacity: enabled ? 1 : 0.5
+
+            PanelSectionHeader {
+              textFormat: Text.PlainText
+              text: strings.t("section.thumbWheel")
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+            }
+
+            Item {
+              width: parent.width
+              implicitHeight: hscrollLabel.implicitHeight
+              Text {
+                id: hscrollLabel
+                textFormat: Text.PlainText
+                text: strings.t("hscroll.label")
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+              Text {
+                anchors.right: parent.right
+                textFormat: Text.PlainText
+                text: hscrollSlider.dragging
+                  ? strings.t("hscroll.value").arg(Math.round(hscrollSlider.liveValue))
+                  : (root.hscroll > 0 ? strings.t("hscroll.value").arg(root.hscroll) : strings.t("hscroll.custom"))
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+
+            PanelSlider {
+              id: hscrollSlider
+              width: parent.width
+              bar: root.bar
+              minimum: 1
+              maximum: 10
+              step: 1
+              integer: true
+              value: root.hscroll > 0 ? root.hscroll : 1
+              onReleased: function(v) { root.setValue("hscroll", Math.round(v)) }
+              WheelGuard { flickable: flick }
+            }
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: strings.t("hscroll.note")
+              color: root.bar.foreground
+              opacity: 0.5
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
           }
 
