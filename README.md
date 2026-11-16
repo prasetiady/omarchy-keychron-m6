@@ -94,13 +94,16 @@ The widget finds the mouse on any of its three connections. When the cable
 and the receiver are both connected, the widget uses the cable, because only
 the cable reports charging reliably. The widget asks each Keychron receiver
 which mouse it is paired with, and uses the receiver only when that mouse is
-the PixArt 3311 M6. Bluetooth is not tested yet.
+the PixArt 3311 M6.
 
 | Connection | Bar and panel | Changing settings |
 |---|---|---|
 | 2.4 GHz Keychron Link receiver, paired with the M6 | Battery and all settings | Yes |
 | USB-C cable | Battery, charging state, and all settings | Yes |
-| Bluetooth | Battery, read from UPower | Only if the Bluetooth HID map exposes the vendor page `0xFFC1` |
+| Bluetooth | Battery, read from UPower, plus acceleration and scroll speed | No. Over Bluetooth the M6 has no settings interface, only its pointer and keyboard reports. |
+
+Settings stored on the mouse, such as DPI, buttons, and the thumb wheel speed,
+stay active over Bluetooth. To change them, connect the receiver or the cable.
 
 When the mouse sleeps behind the receiver, the panel shows "Asleep: move the
 mouse" and keeps the last values it read.

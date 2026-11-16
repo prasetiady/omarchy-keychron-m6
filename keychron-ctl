@@ -74,7 +74,9 @@ STATE_DIR = os.environ.get(
 TIMEOUT = float(os.environ.get("KEYCHRON_TIMEOUT", "1.0"))
 RETRIES = 2
 
-DEFAULT_HYPR_NAMES = ["keychron-keychron-m6", "keychron--keychron-link-km"]
+# Hyprland's names for the M6 pointer: on the cable, through the Link-KM
+# receiver, and over Bluetooth. hypr/pointer.lua carries the same list.
+DEFAULT_HYPR_NAMES = ["keychron-keychron-m6", "keychron--keychron-link-km", "keychron-m6-mouse"]
 HYPR_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9:._-]{0,127}$")
 HYPR_MOUSE_RE = re.compile(r"keychron.*(m6|link)")
 

@@ -43,9 +43,11 @@ if not profile and not factor then
   return
 end
 
-local names = read_lines(dir .. "device-names", 32)
-if #names == 0 then
-  names = { "keychron-keychron-m6", "keychron--keychron-link-km" }
+-- Hyprland's names for the M6 pointer on the cable, through the Link-KM
+-- receiver, and over Bluetooth, plus any name the widget saw since.
+local names = { "keychron-keychron-m6", "keychron--keychron-link-km", "keychron-m6-mouse" }
+for _, name in ipairs(read_lines(dir .. "device-names", 32)) do
+  names[#names + 1] = name
 end
 
 -- Hyprland adds a number to a device name when the device reconnects

@@ -20,8 +20,8 @@
 
 # Keychron M6, PixArt 3311 version (M6S-A72), on the USB-C cable
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_USB_VENDOR_ID}=="3434", ENV{ID_USB_MODEL_ID}=="d064", ENV{ID_USB_INTERFACE_NUM}=="04", TAG+="uaccess"
-# The same mouse over Bluetooth (untested)
-KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0005:3434:D064.*", TAG+="uaccess"
+# No Bluetooth line: over Bluetooth the M6 has no settings interface, only its
+# pointer and keyboard reports, and the widget reads the battery from UPower.
 # Keychron Link-KM receiver (the product ID depends on the port)
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_USB_VENDOR_ID}=="3434", ENV{ID_USB_MODEL_ID}=="d026", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_USB_VENDOR_ID}=="3434", ENV{ID_USB_MODEL_ID}=="d029", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"

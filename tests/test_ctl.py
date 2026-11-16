@@ -376,7 +376,8 @@ class PointerSettingsTest(CtlTestCase):
         self.assertEqual(self.read_state("accel-profile"), ["flat"])
         self.assertEqual(self.read_state("scroll-factor"), ["0.75"])
         self.assertEqual(self.read_state("device-names"),
-                         ["keychron-keychron-m6", "keychron--keychron-link-km", "keychron-m6-bt"])
+                         ["keychron-keychron-m6", "keychron--keychron-link-km", "keychron-m6-mouse",
+                          "keychron-m6-bt"])
         srun.assert_called_once_with(["hyprctl", "reload"], capture_output=True, timeout=10, check=False)
 
     def test_hyprland_names_are_filtered(self):
@@ -430,10 +431,14 @@ class PointerLuaTest(CtlTestCase):
         self.assertEqual(lines[0], "keychron-keychron-m6\tflat\t0.5")
         self.assertFalse([line for line in lines if line.startswith("Bad")])
 
+    def test_bluetooth_name_is_covered_without_a_saved_list(self):
+        names = [line.split("\t")[0] for line in self.run_lua({"scroll-factor": "0.5\n"})]
+        self.assertIn("keychron-m6-mouse", names)
+
     def test_numbered_variants_of_a_name_are_covered(self):
         lines = self.run_lua({"scroll-factor": "0.5\n", "device-names": "keychron--keychron-link-km-1\n"})
         names = [line.split("\t")[0] for line in lines]
-        self.assertEqual(names[0], "keychron--keychron-link-km")
+        self.assertIn("keychron--keychron-link-km", names)
         self.assertIn("keychron--keychron-link-km-1", names)
         self.assertIn("keychron--keychron-link-km-9", names)
         self.assertEqual(len(names), len(set(names)))
