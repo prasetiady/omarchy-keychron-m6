@@ -10,14 +10,11 @@
   "state.connectedVia": "Connected · %1",
   "tooltip.battery": "Keychron M6 · %1%",
   "tooltip.noBattery": "Keychron M6",
-
   "section.sensitivity": "SENSITIVITY",
   "dpi.level": "Level %1 · %2 DPI",
   "dpi.active": "Active level",
   "dpi.value": "%1 DPI",
-
   "section.pollingRate": "POLLING RATE",
-
   "section.sensor": "SENSOR",
   "sensor.motionSync": "Motion Sync",
   "sensor.motionSyncDesc": "Aligns sensor reads with USB polling. Adds a little latency.",
@@ -25,26 +22,24 @@
   "sensor.angleSnapDesc": "Straightens near-horizontal and near-vertical movement.",
   "sensor.ripple": "Ripple Control",
   "sensor.rippleDesc": "Smooths jitter at high DPI. Adds a little latency.",
-
   "section.pointer": "POINTER",
   "accel.label": "Acceleration",
   "accel.default": "System default",
   "accel.flat": "Flat",
   "accel.adaptive": "Adaptive",
+  "scroll.label": "Scroll speed",
+  "scroll.value": "%1×",
+  "scroll.default": "System default",
   "accel.note": "Set in Hyprland for this computer only. Needs the line from the README in ~/.config/hypr/input.lua.",
-
   "section.power": "POWER",
   "power.sleep": "Sleep after",
   "power.sleepValue": "%1 min",
   "power.debounce": "Click debounce",
   "power.debounceValue": "%1 ms",
-
   "section.buttons": "BUTTONS",
   "buttons.shortcutPlaceholder": "Shortcut, e.g. super+shift+f13",
   "buttons.empty": "Button settings load when the mouse answers.",
-
   "settings.unavailable": "Connect the receiver or the cable to change mouse settings.",
-
   "reset.button": "Restore factory defaults",
   "reset.confirm": "Click again to reset the mouse",
   "reset.note": "Resets DPI, polling rate, buttons, and sleep on the mouse."

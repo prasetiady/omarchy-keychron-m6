@@ -3,10 +3,12 @@
 import contextlib
 import io
 import os
+import shutil
+import subprocess
 import unittest
 from unittest import mock
 
-from support import CtlTestCase, FakeMouse, MOUSE_DESCRIPTOR, snapshot
+from support import ROOT, CtlTestCase, FakeMouse, MOUSE_DESCRIPTOR, bond_reply, snapshot
 
 REPLY_LONG = 0xB4
 REPLY_SHORT = 0xB6
@@ -17,6 +19,17 @@ def run(ctl, *argv):
     with contextlib.redirect_stdout(out):
         code = ctl.main(["keychron-ctl"] + list(argv))
     return code, out.getvalue()
+
+
+def receiver(snap=None, paired=0xD064):
+    """A fake receiver: answers the bond query, and the snapshot when awake."""
+    def handler(rid, payload):
+        if payload[0] == 0x03:
+            return [bond_reply(paired)]
+        if payload[0] == 0x06 and snap is not None:
+            return [[REPLY_LONG] + list(snap)]
+        return []
+    return handler
 
 
 def pairs(text):
@@ -38,6 +51,12 @@ class DiscoveryTest(CtlTestCase):
         self.add_node("hidraw8", 3, 0x3434, 0xD029)
         self.add_node("hidraw18", 3, 0x3434, 0xD064)
         self.assertEqual([n.kind for n in self.ctl.find_nodes()], ["usb", "receiver"])
+
+    def test_only_the_3311_m6_is_found_but_any_receiver_is(self):
+        self.add_node("hidraw5", 3, 0x3434, 0xD049, product="Keychron Keychron M6 8K")
+        self.add_node("hidraw6", 3, 0x3434, 0xD028, product="Keychron Ultra-Link 8K")
+        kinds = [(n.name, n.kind) for n in self.ctl.find_nodes()]
+        self.assertEqual(kinds, [("hidraw6", "receiver")])
 
     def test_bluetooth_node_with_vendor_page(self):
         self.add_node("hidraw20", 5, 0x3434, 0xD064)
@@ -105,8 +124,9 @@ class ProtocolTest(CtlTestCase):
     def test_sensor_payload_uses_one_for_on_and_two_for_off(self):
         snap = self.ctl.parse_snapshot(snapshot(sensor=0b00010000))  # motion sync on
         p = self.ctl.sensor_payload(snap, {"motion-sync": 0, "angle-snap": 1})
-        self.assertEqual(p[0], 0x42)
-        self.assertEqual(p[2:5], [2, 1, 2])  # ripple off, angle snap on, motion sync off
+        # ripple off, angle snap on, motion sync off; scroll direction (p[6]),
+        # 20K FPS (p[8]), and lift-off (p[1], p[11]) are re-sent unchanged.
+        self.assertEqual(p, [0x42, 0, 2, 1, 2, 0, 1, 0, 1, 0, 0, 0])
 
     def test_snap_dpi(self):
         self.assertEqual(self.ctl.snap_dpi(1234), 1250)
@@ -162,28 +182,62 @@ class TransportTest(CtlTestCase):
         with self.assertRaises(self.ctl.NoReply):
             self.ctl.get_snapshot(dev)
 
-    def test_write_waits_for_ack(self):
+
+
+class WriteTest(CtlTestCase):
+    """`set` validates first, waits for the acknowledgement, and reads back."""
+
+    def mouse(self, ack=True, status=0, stores=True):
+        state = {"rate_level": 2}
         sent = []
 
         def handler(rid, payload):
-            sent.append((rid, payload[0]))
-            if payload[0] == 0x06:
-                return [[REPLY_LONG] + list(snapshot())]
-            if payload[0] == 0x02:
+            sent.append((rid, list(payload)))
+            op = payload[0]
+            if op == 0x03:
+                return [bond_reply()]
+            if op == 0x06:
+                return [[REPLY_LONG] + list(snapshot(rate_level=state["rate_level"]))]
+            if op == 0x02:
                 return []
-            return [[REPLY_SHORT, 0xE4, 0, payload[0]] + [0] * 17]
+            if op == 0x41 and stores and status == 0:
+                state["rate_level"] = payload[1]
+            return [[REPLY_SHORT, 0xE4, status, op] + [0] * 17] if ack else []
 
         self.add_node("hidraw8", 3, 0x3434, 0xD029)
         self.attach(FakeMouse(handler))
+        return sent
+
+    def test_set_rate_sends_the_exact_payload_and_reads_back(self):
+        sent = self.mouse()
         code, _ = run(self.ctl, "set", "rate", "500")
         self.assertEqual(code, 0)
-        self.assertIn((0xB5, 0x41), sent)
+        writes = [p for rid, p in sent if rid == 0xB5 and p[0] == 0x41]
+        self.assertEqual(writes, [[0x41, 1, 1, 0, 1, 2, 0, 0, 0, 3] + [0] * 10])
+
+    def test_no_acknowledgement_is_an_error(self):
+        self.mouse(ack=False)
+        self.assertEqual(run(self.ctl, "set", "rate", "500")[0], 4)
+
+    def test_refused_write_exits_1(self):
+        self.mouse(status=2)
+        self.assertEqual(run(self.ctl, "set", "rate", "500")[0], 1)
+
+    def test_value_the_mouse_did_not_store_exits_1(self):
+        self.mouse(stores=False)
+        self.assertEqual(run(self.ctl, "set", "rate", "500")[0], 1)
+
+    def test_invalid_values_exit_1_without_a_mouse(self):
+        for key, value in (("rate", "300"), ("dpi", "20000"), ("motion-sync", "maybe"), ("bogus", "1")):
+            with self.assertRaises(SystemExit) as cm:
+                self.ctl.cmd_set(key, value)
+            self.assertNotEqual(cm.exception.code, 0)
 
 
 class StatusTest(CtlTestCase):
     def test_receiver_status(self):
         self.add_node("hidraw8", 3, 0x3434, 0xD029)
-        self.attach(FakeMouse(lambda rid, p: [[REPLY_LONG] + list(snapshot(battery=61))] if p[0] == 6 else []))
+        self.attach(FakeMouse(receiver(snapshot(battery=61))))
         code, out = run(self.ctl, "status")
         got = pairs(out)
         self.assertEqual(code, 0)
@@ -194,10 +248,25 @@ class StatusTest(CtlTestCase):
 
     def test_sleeping_mouse_behind_receiver_is_asleep_not_gone(self):
         self.add_node("hidraw8", 3, 0x3434, 0xD029)
-        self.attach(FakeMouse(lambda rid, p: []))
+        self.attach(FakeMouse(receiver(snap=None)))
         _, out = run(self.ctl, "status")
         got = pairs(out)
         self.assertEqual((got["present"], got["link"]), ("true", "asleep"))
+
+    def test_bluetooth_mouse_wins_over_a_silent_receiver(self):
+        self.add_node("hidraw8", 3, 0x3434, 0xD029)
+        self.add_node("hidraw21", 5, 0x3434, 0xD064, descriptor=MOUSE_DESCRIPTOR)
+        self.attach(FakeMouse(receiver(snap=None)))
+        with mock.patch.object(self.ctl, "upower_battery", return_value={"battery": 70, "charging": False}):
+            _, out = run(self.ctl, "status")
+        got = pairs(out)
+        self.assertEqual((got["connection"], got["battery"]), ("bluetooth", "70"))
+
+    def test_receiver_paired_with_another_mouse_is_ignored(self):
+        self.add_node("hidraw8", 3, 0x3434, 0xD029)
+        self.attach(FakeMouse(receiver(snapshot(), paired=0xD049)))
+        _, out = run(self.ctl, "status")
+        self.assertEqual(pairs(out)["present"], "false")
 
     def test_access_denied_is_reported(self):
         self.add_node("hidraw8", 3, 0x3434, 0xD029)
@@ -217,9 +286,21 @@ class StatusTest(CtlTestCase):
         got = pairs(out)
         self.assertEqual((got["connection"], got["battery"], got["settings"]), ("bluetooth", "55", "false"))
 
+    def test_upower_parser_reads_the_m6_only(self):
+        listing = "/org/freedesktop/UPower/devices/keyboard_dev_1\n/org/freedesktop/UPower/devices/mouse_dev_2\n"
+        keyboard = "  model:                Keychron K3 Max\n  percentage:          40%\n  state:               discharging\n"
+        mouse = "  model:                Keychron M6\n  percentage:          81%\n  state:               charging\n"
+
+        def fake_run(args, **kwargs):
+            text = listing if args[1] == "-e" else (keyboard if "keyboard" in args[2] else mouse)
+            return mock.Mock(stdout=text.encode())
+
+        with mock.patch.object(self.ctl.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(self.ctl.upower_battery(), {"battery": 81, "charging": True})
+
     def test_status_values_are_plain(self):
         self.add_node("hidraw8", 3, 0x3434, 0xD029)
-        self.attach(FakeMouse(lambda rid, p: [[REPLY_LONG] + list(snapshot())] if p[0] == 6 else []))
+        self.attach(FakeMouse(receiver(snapshot())))
         _, out = run(self.ctl, "status")
         for line in out.splitlines():
             key, _, value = line.partition("=")
@@ -227,18 +308,26 @@ class StatusTest(CtlTestCase):
             self.assertRegex(value, r"^[A-Za-z0-9.,-]*$")
 
 
-class AccelTest(CtlTestCase):
-    def test_accel_writes_data_files(self):
-        with mock.patch.object(self.ctl, "hypr_mouse_names", return_value=["keychron-m6-bt"]), \
+class PointerSettingsTest(CtlTestCase):
+    """Acceleration and scroll speed: Hyprland settings stored as plain data."""
+
+    def write(self, changes, mice=()):
+        with mock.patch.object(self.ctl, "hypr_mouse_names", return_value=list(mice)), \
              mock.patch.object(self.ctl.subprocess, "run") as srun:
-            self.ctl.write_accel("flat")
-        state = os.environ["KEYCHRON_STATE_DIR"]
-        with open(os.path.join(state, "accel-profile")) as f:
-            self.assertEqual(f.read().strip(), "flat")
-        with open(os.path.join(state, "device-names")) as f:
-            names = f.read().split()
-        self.assertEqual(names, ["keychron-keychron-m6", "keychron--keychron-link-km", "keychron-m6-bt"])
-        srun.assert_called_with(["hyprctl", "reload"], capture_output=True, timeout=10, check=False)
+            self.ctl.write_hypr(changes)
+        return srun
+
+    def read_state(self, name):
+        with open(os.path.join(os.environ["KEYCHRON_STATE_DIR"], name)) as f:
+            return f.read().split()
+
+    def test_writes_data_files_and_reloads_once(self):
+        srun = self.write({"accel": "flat", "scroll-speed": "0.75"}, mice=["keychron-m6-bt"])
+        self.assertEqual(self.read_state("accel-profile"), ["flat"])
+        self.assertEqual(self.read_state("scroll-factor"), ["0.75"])
+        self.assertEqual(self.read_state("device-names"),
+                         ["keychron-keychron-m6", "keychron--keychron-link-km", "keychron-m6-bt"])
+        srun.assert_called_once_with(["hyprctl", "reload"], capture_output=True, timeout=10, check=False)
 
     def test_hyprland_names_are_filtered(self):
         devices = ('{"mice": [{"name": "keychron-keychron-m6"}, {"name": "keychron-m6\\nhl.exec(1)"},'
@@ -248,16 +337,63 @@ class AccelTest(CtlTestCase):
         with mock.patch.object(self.ctl.subprocess, "run", return_value=result):
             self.assertEqual(self.ctl.hypr_mouse_names(), ["keychron-keychron-m6"])
 
-    def test_accel_rejects_unknown_profile(self):
+    def test_values_are_validated_and_normalized(self):
+        self.assertEqual(self.ctl.parse_hypr("scroll-speed", "1.5"), "1.50")
+        self.assertEqual(self.ctl.parse_hypr("scroll-speed", "default"), "default")
+        for bad in ("0", "3.5", "nan", "inf", "1e9", "os.exit()"):
+            with self.assertRaises(SystemExit, msg=bad):
+                self.ctl.parse_hypr("scroll-speed", bad)
         with self.assertRaises(SystemExit):
-            self.ctl.cmd_set("accel", "custom")
+            self.ctl.parse_hypr("accel", "custom")
 
-    def test_default_removes_profile(self):
-        with mock.patch.object(self.ctl, "hypr_mouse_names", return_value=[]), \
-             mock.patch.object(self.ctl.subprocess, "run"):
-            self.ctl.write_accel("adaptive")
-            self.ctl.write_accel("default")
-        self.assertEqual(self.ctl.read_accel(), "default")
+    def test_default_removes_the_file(self):
+        self.write({"accel": "adaptive", "scroll-speed": "2"})
+        self.write({"accel": "default", "scroll-speed": "default"})
+        self.assertEqual((self.ctl.read_hypr("accel"), self.ctl.read_hypr("scroll-speed")), ("default", "default"))
+
+    def test_a_tampered_file_reads_as_default(self):
+        os.makedirs(os.environ["KEYCHRON_STATE_DIR"], exist_ok=True)
+        with open(os.path.join(os.environ["KEYCHRON_STATE_DIR"], "scroll-factor"), "w") as f:
+            f.write("<b>9</b>\n")
+        self.assertEqual(self.ctl.read_hypr("scroll-speed"), "default")
+
+
+@unittest.skipUnless(shutil.which("lua"), "lua is not installed")
+class PointerLuaTest(CtlTestCase):
+    """hypr/pointer.lua applies only validated values."""
+
+    def run_lua(self, files):
+        state = os.path.join(self.tmp, "home", ".local", "state", "keychron-m6")
+        os.makedirs(state)
+        for name, text in files.items():
+            with open(os.path.join(state, name), "w") as f:
+                f.write(text)
+        stub = 'hl={device=function(t) print(t.name, tostring(t.accel_profile), tostring(t.scroll_factor)) end}'
+        out = subprocess.run(["lua", "-e", stub, os.path.join(ROOT, "hypr", "pointer.lua")],
+                             env={"HOME": os.path.join(self.tmp, "home")}, capture_output=True, text=True)
+        self.assertEqual(out.stderr, "")
+        return out.stdout.splitlines()
+
+    def test_applies_both_settings_to_valid_names_only(self):
+        lines = self.run_lua({"accel-profile": "flat\n", "scroll-factor": "0.50\n",
+                              "device-names": "keychron-keychron-m6\nBad Name\n"})
+        self.assertEqual(lines[0], "keychron-keychron-m6\tflat\t0.5")
+        self.assertFalse([line for line in lines if line.startswith("Bad")])
+
+    def test_numbered_variants_of_a_name_are_covered(self):
+        lines = self.run_lua({"scroll-factor": "0.5\n", "device-names": "keychron--keychron-link-km-1\n"})
+        names = [line.split("\t")[0] for line in lines]
+        self.assertEqual(names[0], "keychron--keychron-link-km")
+        self.assertIn("keychron--keychron-link-km-1", names)
+        self.assertIn("keychron--keychron-link-km-9", names)
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_ignores_invalid_values(self):
+        self.assertEqual(self.run_lua({"accel-profile": "custom\n", "scroll-factor": "os.exit()\n"}), [])
+
+    def test_scroll_speed_alone_is_applied(self):
+        lines = self.run_lua({"scroll-factor": "2\n"})
+        self.assertIn("keychron-keychron-m6\tnil\t2", lines)
 
 
 if __name__ == "__main__":

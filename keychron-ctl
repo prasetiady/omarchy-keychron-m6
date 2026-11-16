@@ -32,7 +32,9 @@ import sys
 import time
 
 VENDOR = 0x3434
-MOUSE_PIDS = {0xD064}  # Keychron M6 (1K edition)
+# The widget supports only the PixArt 3311 version of the M6 (M6S-A72 and its
+# colour variants), which has this product ID on the cable.
+MOUSE_PID = 0xD064
 VENDOR_PAGE = bytes([0x06, 0xC1, 0xFF])  # Usage Page (Vendor 0xFFC1)
 
 REPORT_LONG = 0xB3   # 63-byte payload
@@ -57,7 +59,7 @@ OP_ACK = 0xE4
 RATE_CODES = [125, 500, 1000, 2000, 4000, 8000, 250]
 
 DPI_MIN = 50
-DPI_MAX = 12000
+DPI_MAX = 12000  # the PixArt 3311 sensor's limit
 DPI_LEVELS = 5
 
 BUS_USB = 0x0003
@@ -89,15 +91,20 @@ class NoReply(Exception):
     pass
 
 
+class Refused(Exception):
+    """The mouse answered a write with an error status."""
+
+
 # ---------------------------------------------------------------- discovery
 
 class Node:
-    def __init__(self, name, bus, vid, pid, kind):
+    def __init__(self, name, bus, vid, pid, kind, product=""):
         self.name = name
         self.bus = bus
         self.vid = vid
         self.pid = pid
         self.kind = kind
+        self.product = product
 
     @property
     def path(self):
@@ -123,12 +130,26 @@ def parse_hid_id(uevent):
     return None
 
 
-def classify(bus, pid):
-    if bus == BUS_BLUETOOTH:
-        return "bluetooth"
-    if pid in MOUSE_PIDS:
-        return "usb"
-    return "receiver"
+def parse_hid_name(uevent):
+    for line in uevent.splitlines():
+        if line.startswith("HID_NAME="):
+            return line[9:].strip()[:128]
+    return ""
+
+
+# Keychron ships one receiver under several product IDs (the Link-KM shows up
+# as d026 or d029 depending on the port), so receivers are found by name. The
+# mouse paired with a receiver is checked separately, with the bond query.
+RECEIVER_NAME_RE = re.compile(r"link|receiver|dongle", re.IGNORECASE)
+
+
+def classify(bus, pid, product):
+    """The node's role, or None when it is neither the M6 nor a receiver."""
+    if RECEIVER_NAME_RE.search(product):
+        return "receiver"
+    if pid != MOUSE_PID:
+        return None
+    return "bluetooth" if bus == BUS_BLUETOOTH else "usb"
 
 
 KIND_ORDER = {"usb": 0, "receiver": 1, "bluetooth": 2}
@@ -138,9 +159,8 @@ def find_nodes(sysfs=None):
     """Keychron hidraw nodes that carry the vendor page, best path first.
 
     The cable wins over the receiver because only the wired path reports the
-    charging bit reliably. Receiver PIDs are not hardcoded: the Link-KM shows
-    up as d026 or d029 depending on the port, and any Keychron node with the
-    vendor page that is not the mouse itself is treated as a receiver.
+    charging bit reliably. A receiver is returned whatever mouse it is paired
+    with; callers check that with `paired_with_m6` before they use it.
     """
     root = sysfs or SYSFS
     try:
@@ -153,7 +173,8 @@ def find_nodes(sysfs=None):
             continue
         dev = os.path.join(root, name, "device")
         try:
-            ident = parse_hid_id(_read(os.path.join(dev, "uevent"), MAX_UEVENT))
+            uevent = _read(os.path.join(dev, "uevent"), MAX_UEVENT)
+            ident = parse_hid_id(uevent)
             desc = _read(os.path.join(dev, "report_descriptor"), MAX_DESCRIPTOR, binary=True)
         except OSError:
             continue
@@ -162,7 +183,10 @@ def find_nodes(sysfs=None):
         bus, vid, pid = ident
         if vid != VENDOR or VENDOR_PAGE not in desc:
             continue
-        nodes.append(Node(name, bus, vid, pid, classify(bus, pid)))
+        product = parse_hid_name(uevent)
+        kind = classify(bus, pid, product)
+        if kind:
+            nodes.append(Node(name, bus, vid, pid, kind, product))
     nodes.sort(key=lambda n: (KIND_ORDER[n.kind], n.name))
     return nodes
 
@@ -179,7 +203,7 @@ def any_keychron_bluetooth(sysfs=None):
             ident = parse_hid_id(_read(os.path.join(root, name, "device", "uevent"), MAX_UEVENT))
         except OSError:
             continue
-        if ident and ident[0] == BUS_BLUETOOTH and ident[1] == VENDOR:
+        if ident == (BUS_BLUETOOTH, VENDOR, MOUSE_PID):
             return True
     return False
 
@@ -264,7 +288,7 @@ class Device:
 
         body = self.request(report_id, payload, acked, timeout=timeout)
         if body[0] == OP_ACK and body[1] not in (0, 1):
-            raise NoReply(op)
+            raise Refused(op)
         return body
 
 
@@ -301,13 +325,9 @@ def parse_snapshot(b):
         "sleep": b[18],
         "battery": b[19] & 0x7F,
         "charging": bool(b[19] & 0x80),
-        "feature1": b[26],
-        "dpi_max": le16(b, 40),
         "dpi_step": b[42] or 50,
         "rate_codes": rate_codes,
-        "rate_count": rate_count,
         "fps20k": b[52] & 1,
-        "feature2": b[53],
         "lod_byte": b[61],
     }
 
@@ -317,15 +337,9 @@ def parse_info(b):
     if len(b) < 16 or b[0] != OP_INFO:
         return None
     return {
-        "version": le16(b, 1),
-        "vid": le16(b, 3),
         "pid": le16(b, 5),
         "firmware": "%d.%d.%d" % (b[8], (b[7] >> 4) & 15, b[7] & 15),
         "work_mode": b[9] & 7,
-        "feature1": b[11],
-        "feature2": b[12],
-        "feature3": b[13],
-        "feature4": b[15],
     }
 
 
@@ -354,6 +368,28 @@ def slot_for(snap, info):
     return slots[0]
 
 
+OP_BOND = 0x03
+BOND_SLOTS = 3
+
+
+def paired_with_m6(dev):
+    """True when a receiver's bond list holds the supported M6.
+
+    The reply lists up to three slots of five bytes after the opcode and a
+    count: VID and PID (little-endian) and a link-state byte. The receiver
+    answers this from its own memory, so it works while the mouse sleeps.
+    """
+    try:
+        b = dev.request(REPORT_SHORT, [OP_BOND], lambda r: len(r) > 6 and r[0] == OP_BOND, retries=1)
+    except NoReply:
+        return False
+    for i in range(BOND_SLOTS):
+        off = 2 + 5 * i
+        if off + 4 < len(b) and le16(b, off) == VENDOR and le16(b, off + 2) == MOUSE_PID:
+            return True
+    return False
+
+
 def get_snapshot(dev):
     body = dev.request(REPORT_LONG, [OP_SNAPSHOT], lambda b: len(b) > 0 and b[0] == OP_SNAPSHOT)
     snap = parse_snapshot(body)
@@ -376,12 +412,36 @@ def state_path(name):
     return os.path.join(STATE_DIR, name)
 
 
-def read_accel():
+# Pointer settings that Hyprland applies, not the mouse. Each one is a single
+# word in its own file under STATE_DIR; hypr/pointer.lua reads them as data.
+HYPR_FILES = {"accel": "accel-profile", "scroll-speed": "scroll-factor"}
+SCROLL_MIN = 0.1
+SCROLL_MAX = 3.0
+
+
+def parse_hypr(key, value):
+    """Validate a Hyprland pointer setting; return the word to store."""
+    if value == "default":
+        return value
+    if key == "accel":
+        if value not in ("flat", "adaptive"):
+            raise SystemExit("keychron-ctl: accel must be flat, adaptive or default")
+        return value
     try:
-        word = _read(state_path("accel-profile"), 32).strip()
-    except OSError:
+        factor = float(value)
+    except ValueError:
+        factor = -1.0
+    if not SCROLL_MIN <= factor <= SCROLL_MAX:
+        raise SystemExit("keychron-ctl: scroll-speed must be %.1f..%.1f or default" % (SCROLL_MIN, SCROLL_MAX))
+    return "%.2f" % factor
+
+
+def read_hypr(key):
+    try:
+        word = _read(state_path(HYPR_FILES[key]), 32).strip()
+        return parse_hypr(key, word)
+    except (OSError, SystemExit):
         return "default"
-    return word if word in ("flat", "adaptive") else "default"
 
 
 def hypr_mouse_names():
@@ -400,15 +460,17 @@ def hypr_mouse_names():
     return names
 
 
-def write_accel(value):
+def write_hypr(changes):
+    """Store validated pointer settings, then reload Hyprland once."""
     os.makedirs(STATE_DIR, exist_ok=True)
-    if value == "default":
-        for name in ("accel-profile",):
+    for key, value in changes.items():
+        path = state_path(HYPR_FILES[key])
+        if value == "default":
             try:
-                os.remove(state_path(name))
+                os.remove(path)
             except FileNotFoundError:
                 pass
-    else:
+            continue
         names = []
         try:
             names = _read(state_path("device-names"), 8192).split()
@@ -418,7 +480,7 @@ def write_accel(value):
             if HYPR_NAME_RE.match(n) and n not in names:
                 names.append(n)
         _atomic_write(state_path("device-names"), "\n".join(names[:32]) + "\n")
-        _atomic_write(state_path("accel-profile"), value + "\n")
+        _atomic_write(path, value + "\n")
     subprocess.run(["hyprctl", "reload"], capture_output=True, timeout=10, check=False)
 
 
@@ -485,7 +547,7 @@ def snapshot_pairs(snap, info):
         ("dpi-levels", snap["dpi_levels"]),
         ("dpi-count", snap["dpi_count"]),
         ("dpi-active", dpi_active),
-        ("dpi-max", min(snap["dpi_max"] or DPI_MAX, DPI_MAX)),
+        ("dpi-max", DPI_MAX),
         ("dpi-step", snap["dpi_step"]),
         ("rate", rate if rate else ""),
         ("rate-options", [rate_hz(c) for c in codes if rate_hz(c)]),
@@ -502,21 +564,23 @@ def snapshot_pairs(snap, info):
 
 
 def cmd_status():
-    pairs = [("accel", read_accel())]
+    pairs = [("accel", read_hypr("accel")), ("scroll-speed", read_hypr("scroll-speed"))]
     nodes = find_nodes()
     denied = False
+    asleep = None
     for node in nodes:
         try:
             with Device(node) as dev:
+                if node.kind == "receiver" and not paired_with_m6(dev):
+                    continue
                 try:
                     snap = get_snapshot(dev)
                 except NoReply:
-                    if node.kind == "receiver":
-                        # The receiver is there but the mouse did not answer:
-                        # it is asleep or out of range, not disconnected.
-                        emit([("present", True), ("access", "ok"), ("connection", node.kind),
-                              ("link", "asleep")] + pairs)
-                        return 0
+                    # A paired receiver whose mouse does not answer means the
+                    # mouse is asleep, out of range, or on another connection.
+                    # Keep looking: it may be on Bluetooth.
+                    if node.kind == "receiver" and asleep is None:
+                        asleep = node
                     continue
                 info = get_info(dev)
         except AccessDenied:
@@ -537,6 +601,11 @@ def cmd_status():
         emit(out + pairs)
         return 0
 
+    if asleep:
+        emit([("present", True), ("access", "ok"), ("connection", asleep.kind),
+              ("link", "asleep")] + pairs)
+        return 0
+
     emit([("present", False), ("access", "denied" if denied else "ok")] + pairs)
     return 0
 
@@ -551,9 +620,11 @@ def open_mouse():
             denied = True
             continue
         try:
-            return dev, get_snapshot(dev)
+            if node.kind != "receiver" or paired_with_m6(dev):
+                return dev, get_snapshot(dev)
         except (NoReply, OSError):
-            dev.close()
+            pass
+        dev.close()
     if denied:
         raise AccessDenied("no permission on the Keychron hidraw node")
     raise NoReply(OP_SNAPSHOT)
@@ -603,53 +674,101 @@ def sensor_payload(snap, overrides):
     return p
 
 
+SENSOR_KEYS = ("ripple", "angle-snap", "motion-sync", "scroll-reverse")
+ON_OFF = {"on": 1, "true": 1, "1": 1, "off": 0, "false": 0, "0": 0}
+READBACK_TRIES = 4
+
+
+def parse_setting(key, value):
+    """Validate a mouse setting without the mouse; return the value to store."""
+    if key == "dpi-active":
+        return parse_int(value, 0, DPI_LEVELS - 1, key)
+    if key == "dpi":
+        return snap_dpi(parse_int(value, DPI_MIN, DPI_MAX, key))
+    if key == "dpi-levels":
+        parts = value.split(",")
+        if len(parts) != DPI_LEVELS:
+            raise SystemExit("keychron-ctl: dpi-levels needs %d values" % DPI_LEVELS)
+        return [snap_dpi(parse_int(p.strip(), DPI_MIN, DPI_MAX, "dpi")) for p in parts]
+    if key == "rate":
+        hz = parse_int(value, 1, 8000, key)
+        if hz not in RATE_CODES:
+            raise SystemExit("keychron-ctl: rate must be 125, 500 or 1000")
+        return hz
+    if key in SENSOR_KEYS:
+        if value not in ON_OFF:
+            raise SystemExit("keychron-ctl: %s must be on or off" % key)
+        return ON_OFF[value]
+    if key == "debounce":
+        return parse_int(value, 0, 30, key)
+    if key == "sleep":
+        return parse_int(value, 1, 240, key)
+    raise SystemExit("keychron-ctl: unknown setting %r" % key)
+
+
+def stored_setting(key, snap, info):
+    """The value of `key` as the mouse reports it in a snapshot."""
+    slot = slot_for(snap, info)
+    if key == "dpi-active":
+        return slot & 15
+    if key == "dpi":
+        return snap["dpi_levels"][slot & 15]
+    if key == "dpi-levels":
+        return snap["dpi_levels"]
+    if key == "rate":
+        codes = snap["rate_codes"]
+        level = (slot >> 4) & 15
+        return rate_hz(codes[level]) if level < len(codes) else None
+    if key in SENSOR_KEYS:
+        return sensor_bits(snap["sensor_byte"])[key]
+    return snap[key]  # debounce, sleep
+
+
+def setting_payload(key, want, snap, info):
+    level = slot_for(snap, info) & 15
+    levels = list(snap["dpi_levels"])
+    count = snap["dpi_count"] or DPI_LEVELS
+    if key == "dpi-active":
+        if want >= count:
+            raise SystemExit("keychron-ctl: dpi-active must be 0..%d" % (count - 1))
+        return dpi_payload(want, levels, count)
+    if key == "dpi":
+        levels[level] = want
+        return dpi_payload(level, levels, count)
+    if key == "dpi-levels":
+        return dpi_payload(level, want, count)
+    if key == "rate":
+        codes = snap["rate_codes"]
+        if RATE_CODES.index(want) not in codes:
+            raise SystemExit("keychron-ctl: rate must be one of %s" %
+                             ", ".join(str(rate_hz(c)) for c in codes if rate_hz(c)))
+        return rate_payload(codes.index(RATE_CODES.index(want)), codes)
+    if key in SENSOR_KEYS:
+        return sensor_payload(snap, {key: want})
+    if key == "debounce":
+        return [OP_DEBOUNCE, want]
+    return [OP_SLEEP, 1, want]
+
+
 def cmd_set(key, value):
-    if key == "accel":
-        if value not in ("flat", "adaptive", "default"):
-            raise SystemExit("keychron-ctl: accel must be flat, adaptive or default")
-        write_accel(value)
+    if key in HYPR_FILES:
+        write_hypr({key: parse_hypr(key, value)})
         return 0
 
+    want = parse_setting(key, value)
     dev, snap = open_mouse()
     with dev:
         info = get_info(dev)
-        slot = slot_for(snap, info)
-        level = slot & 15
-        levels = list(snap["dpi_levels"])
-        count = snap["dpi_count"] or DPI_LEVELS
-
-        if key == "dpi-active":
-            level = parse_int(value, 0, count - 1, "dpi-active")
-            dev.command(REPORT_SHORT, dpi_payload(level, levels, count))
-        elif key == "dpi-levels":
-            parts = value.split(",")
-            if len(parts) != DPI_LEVELS:
-                raise SystemExit("keychron-ctl: dpi-levels needs %d values" % DPI_LEVELS)
-            levels = [snap_dpi(parse_int(p.strip(), 1, 100000, "dpi"), snap["dpi_step"]) for p in parts]
-            dev.command(REPORT_SHORT, dpi_payload(level, levels, count))
-        elif key == "dpi":
-            # Set the value of the active level only.
-            levels[level] = snap_dpi(parse_int(value, 1, 100000, "dpi"), snap["dpi_step"])
-            dev.command(REPORT_SHORT, dpi_payload(level, levels, count))
-        elif key == "rate":
-            hz = parse_int(value, 1, 8000, "rate")
-            codes = snap["rate_codes"]
-            if hz not in RATE_CODES or RATE_CODES.index(hz) not in codes:
-                raise SystemExit("keychron-ctl: rate must be one of %s" %
-                                 ", ".join(str(rate_hz(c)) for c in codes if rate_hz(c)))
-            dev.command(REPORT_SHORT, rate_payload(codes.index(RATE_CODES.index(hz)), codes))
-        elif key in ("ripple", "angle-snap", "motion-sync", "scroll-reverse"):
-            if value not in ("on", "off", "true", "false", "1", "0"):
-                raise SystemExit("keychron-ctl: %s must be on or off" % key)
-            on = value in ("on", "true", "1")
-            dev.command(REPORT_SHORT, sensor_payload(snap, {key: 1 if on else 0}))
-        elif key == "debounce":
-            dev.command(REPORT_SHORT, [OP_DEBOUNCE, parse_int(value, 0, 30, "debounce")])
-        elif key == "sleep":
-            dev.command(REPORT_SHORT, [OP_SLEEP, 1, parse_int(value, 1, 240, "sleep")])
-        else:
-            raise SystemExit("keychron-ctl: unknown setting %r" % key)
-    return 0
+        dev.command(REPORT_SHORT, setting_payload(key, want, snap, info))
+        # Read back: the panel and scripts must see what the mouse stored. The
+        # receiver forwards a write a little later, so give it a few tries.
+        for _ in range(READBACK_TRIES):
+            got = stored_setting(key, get_snapshot(dev), info)
+            if got == want:
+                return 0
+            time.sleep(0.1)
+    print("keychron-ctl: the mouse stored %s=%s, not %s" % (key, got, want), file=sys.stderr)
+    return 1
 
 
 # ---------------------------------------------------------------- buttons
@@ -676,7 +795,6 @@ KIND_KEYBOARD = 2
 KIND_MEDIA = 3
 KIND_DPI = 5
 KIND_DISABLE = 9
-KIND_RATE = 13
 
 # Mouse functions: three bytes, high to low = [buttons, wheel, horizontal wheel].
 MOUSE_FUNCS = {
@@ -724,8 +842,7 @@ ACTION_LABELS = [
     ("dpi-cycle", "DPI cycle"), ("dpi-up", "DPI up"), ("dpi-down", "DPI down"),
     ("shortcut", "Keyboard shortcut"),
 ]
-ACTIONS = [{"id": i, "label": l, "kind": "shortcut" if i == "shortcut" else "plain"}
-           for i, l in ACTION_LABELS]
+ACTIONS = [{"id": i, "label": l} for i, l in ACTION_LABELS]
 
 
 def parse_shortcut(text):
@@ -825,8 +942,10 @@ def cmd_buttons_set(index, action, arg):
     with dev:
         dev.command(REPORT_LONG, [OP_KEY_SET, index, 0, kind] + data)
         got, got_arg = read_button(dev, index)
-    if got != action and not (action == "default" and got == "other"):
-        print("keychron-ctl: the mouse stored %s, not %s" % (got, action), file=sys.stderr)
+    want_arg = format_shortcut(*data) if action == "shortcut" else ""
+    if (got, got_arg) != (action, want_arg) and not (action == "default" and got == "other"):
+        print("keychron-ctl: the mouse stored %s %s, not %s %s" % (got, got_arg, action, want_arg),
+              file=sys.stderr)
         return 1
     return 0
 
@@ -836,7 +955,7 @@ def cmd_reset():
     with dev:
         dev.command(REPORT_SHORT, [OP_RESET, 0xFF], timeout=3.0)
     try:
-        write_accel("default")
+        write_hypr({key: "default" for key in HYPR_FILES})
     except (OSError, subprocess.SubprocessError):
         pass
     return 0
@@ -866,7 +985,7 @@ def cmd_probe():
         with dev:
             probes = [
                 ("info 0xB5/02", REPORT_SHORT, [OP_INFO], OP_INFO),
-                ("bond 0xB5/03", REPORT_SHORT, [0x03], 0x03),
+                ("bond 0xB5/03", REPORT_SHORT, [OP_BOND], OP_BOND),
                 ("snapshot 0xB3/06", REPORT_LONG, [OP_SNAPSHOT], OP_SNAPSHOT),
                 ("sleep 0xB5/0A get", REPORT_SHORT, [OP_SLEEP, 2], OP_SLEEP),
             ]
@@ -912,6 +1031,9 @@ def main(argv):
     except NoReply:
         print("keychron-ctl: the mouse did not answer; move it to wake it", file=sys.stderr)
         return 4
+    except Refused:
+        print("keychron-ctl: the mouse refused the write", file=sys.stderr)
+        return 1
     finally:
         os.close(lockfd)
 

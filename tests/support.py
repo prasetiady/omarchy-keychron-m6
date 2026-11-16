@@ -57,6 +57,11 @@ def snapshot(battery=85, charging=False, levels=(400, 800, 1600, 3200, 5000),
     return bytes(b)
 
 
+def bond_reply(pid=0xD064):
+    """A receiver's 0x03 reply naming one paired mouse (report id first)."""
+    return [0xB6, 0x03, 0x01, 0x34, 0x34, pid & 0xFF, pid >> 8, 0x01] + [0] * 13
+
+
 class FakeMouse:
     """Answers commands written to one end of a socketpair.
 
@@ -106,18 +111,21 @@ class CtlTestCase(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def add_node(self, name, bus, vid, pid, descriptor=VENDOR_DESCRIPTOR):
+    # Product names as the kernel reports them for real Keychron devices.
+    NAMES = {0xD026: "Keychron  Keychron Link-KM", 0xD029: "Keychron  Keychron Link-KM",
+             0xD064: "Keychron Keychron M6"}
+
+    def add_node(self, name, bus, vid, pid, descriptor=VENDOR_DESCRIPTOR, product=None):
         dev = os.path.join(os.environ["KEYCHRON_SYSFS"], name, "device")
         os.makedirs(dev)
+        product = product or self.NAMES.get(pid, "Keychron Keychron M6")
         with open(os.path.join(dev, "uevent"), "w") as f:
-            f.write("DRIVER=hid-generic\nHID_ID=%04X:%08X:%08X\nHID_NAME=Keychron\n" % (bus, vid, pid))
+            f.write("DRIVER=hid-generic\nHID_ID=%04X:%08X:%08X\nHID_NAME=%s\n" % (bus, vid, pid, product))
         with open(os.path.join(dev, "report_descriptor"), "wb") as f:
             f.write(descriptor)
 
     def attach(self, mouse):
         """Make every Device in the module talk to `mouse` instead of /dev."""
-        test = self
-
         class Fake(self.ctl.Device):
             def __init__(self, node):
                 self.node = node
@@ -126,4 +134,3 @@ class CtlTestCase(unittest.TestCase):
 
         self.ctl.Device = Fake
         self.addCleanup(mouse.close)
-        return test

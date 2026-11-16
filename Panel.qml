@@ -39,13 +39,17 @@ Panel {
   readonly property int battery: Model.battery(root.status)
   readonly property bool charging: Model.toBool(root.status.charging)
   readonly property bool lowBattery: Model.isLow(root.status, root.lowThreshold)
-  readonly property bool usbConnected: root.status.connection === "usb"
 
   readonly property var dpiLevels: Model.intList(root.value("dpi-levels"))
   readonly property int dpiCount: Model.toInt(root.status["dpi-count"], 5)
   readonly property int dpiActive: Model.toInt(root.value("dpi-active"), 0)
   readonly property int dpiStep: Math.max(50, Model.toInt(root.status["dpi-step"], 50))
   readonly property int dpiMax: Model.toInt(root.status["dpi-max"], 12000)
+  // Hyprland's scroll_factor for the mouse; 0 when no value is stored.
+  readonly property real scrollSpeed: {
+    var n = parseFloat(root.value("scroll-speed"))
+    return isFinite(n) ? n : 0
+  }
   readonly property int activeDpi: root.dpiActive < root.dpiLevels.length ? root.dpiLevels[root.dpiActive] : 0
 
   // Current value of `key`, preferring an in-flight write over the last poll.
@@ -134,10 +138,10 @@ Panel {
       onStreamFinished: {
         var parsed = Model.parseStatus(text)
         if (Object.keys(parsed).length === 0) return
-        // A sleeping mouse answers with no settings; keep the last values and
-        // let the header carry the state instead of blanking every control.
-        if (parsed.link === "asleep" || parsed.present === "false")
-          root.status = Object.assign({}, root.status, { present: parsed.present, link: parsed.link || "", access: parsed.access || "", connection: parsed.connection || "" })
+        // A sleeping mouse answers with no settings; keep its last values and
+        // let the header carry the state. An absent mouse has no values left.
+        if (parsed.link === "asleep")
+          root.status = Object.assign({}, root.status, parsed)
         else
           root.status = parsed
         root.pending = ({})
@@ -333,7 +337,7 @@ Panel {
           // without the vendor page) or is asleep.
           Text {
             width: parent.width
-            visible: root.present && !root.canConfigure
+            visible: root.present && !root.canConfigure && root.status.link !== "asleep"
             textFormat: Text.PlainText
             text: strings.t("settings.unavailable")
             color: root.bar.foreground
@@ -385,7 +389,11 @@ Panel {
               value: String(root.dpiActive)
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
-              onChanged: function(v) { if (v !== String(root.dpiActive)) root.setValue("dpi-active", v) }
+              onChanged: function(v) {
+                if (v !== String(root.dpiActive)) root.setValue("dpi-active", v)
+                // Dropdown assigns `value` on a pick, which drops this binding.
+                value = Qt.binding(function() { return String(root.dpiActive) })
+              }
             }
 
             PanelSlider {
@@ -424,7 +432,10 @@ Panel {
               value: String(root.value("rate") || "")
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
-              onChanged: function(v) { if (v !== String(root.value("rate"))) root.setValue("rate", v) }
+              onChanged: function(v) {
+                if (v !== String(root.value("rate"))) root.setValue("rate", v)
+                value = Qt.binding(function() { return String(root.value("rate") || "") })
+              }
             }
           }
 
@@ -465,7 +476,7 @@ Panel {
 
           PanelSeparator { foreground: root.bar.foreground }
 
-          // ---------- Pointer acceleration (Hyprland) ----------
+          // ---------- Pointer acceleration and scroll speed (Hyprland) ----------
           Column {
             width: parent.width
             spacing: Style.space(8)
@@ -488,7 +499,47 @@ Panel {
               value: String(root.value("accel") || "default")
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
-              onChanged: function(v) { if (v !== String(root.value("accel"))) root.setValue("accel", v) }
+              onChanged: function(v) {
+                if (v !== String(root.value("accel"))) root.setValue("accel", v)
+                value = Qt.binding(function() { return String(root.value("accel") || "default") })
+              }
+            }
+
+            Item {
+              width: parent.width
+              implicitHeight: scrollLabel.implicitHeight
+              Text {
+                id: scrollLabel
+                textFormat: Text.PlainText
+                text: strings.t("scroll.label")
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+              Text {
+                anchors.right: parent.right
+                textFormat: Text.PlainText
+                text: scrollSlider.dragging
+                  ? strings.t("scroll.value").arg(I18n.formatNumber(scrollSlider.liveValue, 1))
+                  : (root.scrollSpeed > 0
+                    ? strings.t("scroll.value").arg(I18n.formatNumber(root.scrollSpeed, 1))
+                    : strings.t("scroll.default"))
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+
+            PanelSlider {
+              id: scrollSlider
+              width: parent.width
+              bar: root.bar
+              minimum: 0.1
+              maximum: 3.0
+              step: 0.1
+              value: root.scrollSpeed > 0 ? root.scrollSpeed : 1.0
+              onReleased: function(v) { root.setValue("scroll-speed", (Math.round(v * 10) / 10).toFixed(2)) }
+              WheelGuard { flickable: flick }
             }
 
             Text {
@@ -713,28 +764,29 @@ Panel {
             enabled: root.canConfigure
             opacity: enabled ? 1 : 0.5
 
+            id: resetSection
             property bool armed: false
 
             Timer {
               id: disarm
               interval: 4000
-              onTriggered: parent.armed = false
+              onTriggered: resetSection.armed = false
             }
 
             Button {
               id: resetButton
               width: parent.width
               bordered: true
-              text: parent.armed ? strings.t("reset.confirm") : strings.t("reset.button")
-              foreground: parent.armed ? Color.urgent : root.bar.foreground
+              text: resetSection.armed ? strings.t("reset.confirm") : strings.t("reset.button")
+              foreground: resetSection.armed ? Color.urgent : root.bar.foreground
               fontFamily: root.bar.fontFamily
               onClicked: {
-                if (!parent.armed) {
-                  parent.armed = true
+                if (!resetSection.armed) {
+                  resetSection.armed = true
                   disarm.restart()
                   return
                 }
-                parent.armed = false
+                resetSection.armed = false
                 disarm.stop()
                 root.run(["reset"])
               }

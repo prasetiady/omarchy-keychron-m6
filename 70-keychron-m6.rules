@@ -1,11 +1,27 @@
-# Give the logged-in user access to Keychron HID raw nodes, so the
-# keychron-m6.panel widget can read battery and settings from the mouse.
+# Give the logged-in user access to the Keychron M6 (PixArt 3311 version) and
+# its Link-KM receiver, so the keychron-m6.panel widget can read battery and
+# settings from the mouse. Other Keychron devices, keyboards included, keep
+# their default root-only permissions.
 #
-# KERNELS matches the HID device name "<bus>:<vendor>:<product>.<n>", so one
-# rule covers the USB cable, the 2.4 GHz Link receiver, and Bluetooth.
-# uaccess grants access to the active seat only (no world-writable node).
+# Only the interface that carries the vendor protocol (usage page 0xFFC1) is
+# opened up: interface 1 on the receiver and interface 4 on the mouse's cable.
+# The keyboard and pointer interfaces stay root-only, so keystrokes from a
+# keyboard paired with the receiver are not exposed. uaccess grants access to
+# the active seat only.
 #
 # Install:
 #   sudo install -m 644 70-keychron-m6.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=hidraw
-KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="????:3434:*", TAG+="uaccess"
+
+# The ID_USB_* properties come from 60-persistent-hidraw.rules, which runs
+# first. They live on the hidraw node itself; a rule cannot combine KERNELS
+# (the HID device) with ATTRS{bInterfaceNumber} (the USB interface above it),
+# because udev matches all parent keys on one device.
+
+# Keychron M6, PixArt 3311 version (M6S-A72), on the USB-C cable
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_USB_VENDOR_ID}=="3434", ENV{ID_USB_MODEL_ID}=="d064", ENV{ID_USB_INTERFACE_NUM}=="04", TAG+="uaccess"
+# The same mouse over Bluetooth (untested)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0005:3434:D064.*", TAG+="uaccess"
+# Keychron Link-KM receiver (the product ID depends on the port)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_USB_VENDOR_ID}=="3434", ENV{ID_USB_MODEL_ID}=="d026", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ENV{ID_USB_VENDOR_ID}=="3434", ENV{ID_USB_MODEL_ID}=="d029", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"

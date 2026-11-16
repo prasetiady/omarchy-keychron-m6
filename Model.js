@@ -150,7 +150,7 @@ function parseButtons(raw) {
   for (var j = 0; j < data.actions.length && actions.length < 64; j++) {
     var a = data.actions[j]
     if (!a || typeof a.id !== "string" || !/^[a-z0-9-]{1,32}$/.test(a.id)) continue
-    actions.push({ value: a.id, label: plain(a.label, 40), kind: a.kind === "shortcut" ? "shortcut" : "plain" })
+    actions.push({ value: a.id, label: plain(a.label, 40) })
   }
   return { buttons: buttons, actions: actions }
 }
