@@ -353,7 +353,8 @@ Panel {
 
           PanelSeparator { foreground: root.bar.foreground }
 
-          // ---------- Sensitivity ----------
+
+          // ---------- Pointer: DPI (on the mouse) ----------
           Column {
             width: parent.width
             spacing: Style.space(8)
@@ -368,7 +369,7 @@ Panel {
               PanelSectionHeader {
                 id: dpiHeader
                 textFormat: Text.PlainText
-                text: strings.t("section.sensitivity")
+                text: strings.t("section.pointer")
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
               }
@@ -414,146 +415,12 @@ Panel {
             }
           }
 
-          // ---------- Polling rate ----------
-          Column {
-            width: parent.width
-            spacing: Style.space(8)
-            visible: Model.intList(root.status["rate-options"]).length > 0
-            enabled: root.canConfigure
-            opacity: enabled ? 1 : 0.5
 
-            PanelSectionHeader {
-              textFormat: Text.PlainText
-              text: strings.t("section.pollingRate")
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-            }
-
-            Dropdown {
-              width: parent.width
-              showLabel: false
-              options: Model.rateOptions(Model.intList(root.status["rate-options"]))
-              value: String(root.value("rate") || "")
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-              onChanged: function(v) {
-                if (v !== String(root.value("rate"))) root.setValue("rate", v)
-                value = Qt.binding(function() { return String(root.value("rate") || "") })
-              }
-            }
-          }
-
-          // ---------- Sensor ----------
-          Column {
-            width: parent.width
-            spacing: Style.space(8)
-            visible: root.status["motion-sync"] !== undefined
-            enabled: root.canConfigure
-            opacity: enabled ? 1 : 0.5
-
-            PanelSectionHeader {
-              textFormat: Text.PlainText
-              text: strings.t("section.sensor")
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-            }
-
-            Repeater {
-              model: [
-                { key: "motion-sync", label: "sensor.motionSync", desc: "sensor.motionSyncDesc" },
-                { key: "angle-snap", label: "sensor.angleSnap", desc: "sensor.angleSnapDesc" },
-                { key: "ripple", label: "sensor.ripple", desc: "sensor.rippleDesc" }
-              ]
-
-              Toggle {
-                required property var modelData
-                width: parent.width
-                label: strings.t(modelData.label)
-                description: strings.t(modelData.desc)
-                checked: Model.toBool(root.value(modelData.key))
-                foreground: root.bar.foreground
-                fontFamily: root.bar.fontFamily
-                onClicked: root.setValue(modelData.key, checked ? "0" : "1")
-              }
-            }
-          }
-
-          // ---------- Thumb wheel speed (stored on the mouse) ----------
+          // Acceleration is a Hyprland setting, so it stays usable while the
+          // mouse sleeps; it sits outside the DPI column and its gate.
           Column {
             width: parent.width
             spacing: Style.space(6)
-            visible: root.status.hscroll !== undefined
-            enabled: root.canConfigure
-            opacity: enabled ? 1 : 0.5
-
-            PanelSectionHeader {
-              textFormat: Text.PlainText
-              text: strings.t("section.thumbWheel")
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-            }
-
-            Item {
-              width: parent.width
-              implicitHeight: hscrollLabel.implicitHeight
-              Text {
-                id: hscrollLabel
-                textFormat: Text.PlainText
-                text: strings.t("hscroll.label")
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-              Text {
-                anchors.right: parent.right
-                textFormat: Text.PlainText
-                text: hscrollSlider.dragging
-                  ? strings.t("hscroll.value").arg(Math.round(hscrollSlider.liveValue))
-                  : (root.hscroll > 0 ? strings.t("hscroll.value").arg(root.hscroll) : strings.t("hscroll.custom"))
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-            }
-
-            PanelSlider {
-              id: hscrollSlider
-              width: parent.width
-              bar: root.bar
-              minimum: 1
-              maximum: 10
-              step: 1
-              integer: true
-              value: root.hscroll > 0 ? root.hscroll : 1
-              onReleased: function(v) { root.setValue("hscroll", Math.round(v)) }
-              WheelGuard { flickable: flick }
-            }
-
-            Text {
-              width: parent.width
-              textFormat: Text.PlainText
-              text: strings.t("hscroll.note")
-              color: root.bar.foreground
-              opacity: 0.5
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
-          }
-
-          PanelSeparator { foreground: root.bar.foreground }
-
-          // ---------- Pointer acceleration and scroll speed (Hyprland) ----------
-          Column {
-            width: parent.width
-            spacing: Style.space(8)
-
-            PanelSectionHeader {
-              textFormat: Text.PlainText
-              text: strings.t("section.pointer")
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-            }
 
             Dropdown {
               width: parent.width
@@ -570,6 +437,32 @@ Panel {
                 if (v !== String(root.value("accel"))) root.setValue("accel", v)
                 value = Qt.binding(function() { return String(root.value("accel") || "default") })
               }
+            }
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: strings.t("scope.computer")
+              color: root.bar.foreground
+              opacity: 0.5
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+          }
+
+          PanelSeparator { foreground: root.bar.foreground }
+
+          // ---------- Scrolling: scroll speed (Hyprland), thumb wheel (mouse) ----------
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+
+            PanelSectionHeader {
+              textFormat: Text.PlainText
+              text: strings.t("section.scrolling")
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
             }
 
             Item {
@@ -612,101 +505,81 @@ Panel {
             Text {
               width: parent.width
               textFormat: Text.PlainText
-              text: strings.t("accel.note")
+              text: strings.t("scope.computer")
               color: root.bar.foreground
               opacity: 0.5
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
-          }
 
-          PanelSeparator { foreground: root.bar.foreground; visible: powerSection.visible }
+            // The thumb wheel speed is a mouse setting, so only this part
+            // waits for the mouse.
+            Column {
+              width: parent.width
+              spacing: Style.space(6)
+              topPadding: Style.space(6)
+              visible: root.status.hscroll !== undefined
+              enabled: root.canConfigure
+              opacity: enabled ? 1 : 0.5
 
-          // ---------- Power ----------
-          Column {
-            id: powerSection
-            width: parent.width
-            spacing: Style.space(6)
-            visible: root.status.sleep !== undefined
-            enabled: root.canConfigure
-            opacity: enabled ? 1 : 0.5
+              Item {
+                width: parent.width
+                implicitHeight: hscrollLabel.implicitHeight
+                Text {
+                  id: hscrollLabel
+                  textFormat: Text.PlainText
+                  text: strings.t("hscroll.label")
+                  color: root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+                Text {
+                  anchors.right: parent.right
+                  textFormat: Text.PlainText
+                  text: hscrollSlider.dragging
+                    ? strings.t("hscroll.value").arg(Math.round(hscrollSlider.liveValue))
+                    : (root.hscroll > 0 ? strings.t("hscroll.value").arg(root.hscroll) : strings.t("hscroll.custom"))
+                  color: root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
 
-            PanelSectionHeader {
+              PanelSlider {
+                id: hscrollSlider
+                width: parent.width
+                bar: root.bar
+                minimum: 1
+                maximum: 10
+                step: 1
+                integer: true
+                value: root.hscroll > 0 ? root.hscroll : 1
+                onReleased: function(v) { root.setValue("hscroll", Math.round(v)) }
+                WheelGuard { flickable: flick }
+              }
+
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: strings.t("scope.mouse")
+                color: root.bar.foreground
+                opacity: 0.5
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
+
+            Text {
+              width: parent.width
               textFormat: Text.PlainText
-              text: strings.t("section.power")
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-            }
-
-            Item {
-              width: parent.width
-              implicitHeight: sleepLabel.implicitHeight
-              Text {
-                id: sleepLabel
-                textFormat: Text.PlainText
-                text: strings.t("power.sleep")
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-              Text {
-                anchors.right: parent.right
-                textFormat: Text.PlainText
-                text: strings.t("power.sleepValue").arg(sleepSlider.dragging
-                  ? Math.round(sleepSlider.liveValue) : Model.toInt(root.value("sleep"), 10))
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-            }
-
-            PanelSlider {
-              id: sleepSlider
-              width: parent.width
-              bar: root.bar
-              minimum: 1
-              maximum: 60
-              step: 1
-              integer: true
-              value: Model.toInt(root.value("sleep"), 10)
-              onReleased: function(v) { root.setValue("sleep", Math.round(v)) }
-              WheelGuard { flickable: flick }
-            }
-
-            Item {
-              width: parent.width
-              implicitHeight: debounceLabel.implicitHeight
-              Text {
-                id: debounceLabel
-                textFormat: Text.PlainText
-                text: strings.t("power.debounce")
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-              Text {
-                anchors.right: parent.right
-                textFormat: Text.PlainText
-                text: strings.t("power.debounceValue").arg(debounceSlider.dragging
-                  ? Math.round(debounceSlider.liveValue) : Model.toInt(root.value("debounce"), 0))
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-            }
-
-            PanelSlider {
-              id: debounceSlider
-              width: parent.width
-              bar: root.bar
-              minimum: 0
-              maximum: 20
-              step: 1
-              integer: true
-              value: Model.toInt(root.value("debounce"), 0)
-              onReleased: function(v) { root.setValue("debounce", Math.round(v)) }
-              WheelGuard { flickable: flick }
+              text: strings.t("scroll.combined")
+              color: root.bar.foreground
+              opacity: 0.5
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
           }
 
@@ -821,6 +694,158 @@ Panel {
               }
             }
           }
+
+
+          PanelSeparator { foreground: root.bar.foreground }
+
+          // ---------- Performance: polling rate and sensor ----------
+          Column {
+            width: parent.width
+            spacing: Style.space(8)
+            visible: Model.intList(root.status["rate-options"]).length > 0
+            enabled: root.canConfigure
+            opacity: enabled ? 1 : 0.5
+
+            PanelSectionHeader {
+              textFormat: Text.PlainText
+              text: strings.t("section.performance")
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+            }
+
+            Dropdown {
+              width: parent.width
+              label: strings.t("rate.label")
+              options: Model.rateOptions(Model.intList(root.status["rate-options"]))
+              value: String(root.value("rate") || "")
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              onChanged: function(v) {
+                if (v !== String(root.value("rate"))) root.setValue("rate", v)
+                value = Qt.binding(function() { return String(root.value("rate") || "") })
+              }
+            }
+          }
+
+
+          Column {
+            width: parent.width
+            spacing: Style.space(8)
+            visible: root.status["motion-sync"] !== undefined
+            enabled: root.canConfigure
+            opacity: enabled ? 1 : 0.5
+
+
+            Repeater {
+              model: [
+                { key: "motion-sync", label: "sensor.motionSync", desc: "sensor.motionSyncDesc" },
+                { key: "angle-snap", label: "sensor.angleSnap", desc: "sensor.angleSnapDesc" },
+                { key: "ripple", label: "sensor.ripple", desc: "sensor.rippleDesc" }
+              ]
+
+              Toggle {
+                required property var modelData
+                width: parent.width
+                label: strings.t(modelData.label)
+                description: strings.t(modelData.desc)
+                checked: Model.toBool(root.value(modelData.key))
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                onClicked: root.setValue(modelData.key, checked ? "0" : "1")
+              }
+            }
+          }
+
+
+          PanelSeparator { foreground: root.bar.foreground; visible: powerSection.visible }
+
+          // ---------- Power ----------
+          Column {
+            id: powerSection
+            width: parent.width
+            spacing: Style.space(6)
+            visible: root.status.sleep !== undefined
+            enabled: root.canConfigure
+            opacity: enabled ? 1 : 0.5
+
+            PanelSectionHeader {
+              textFormat: Text.PlainText
+              text: strings.t("section.power")
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+            }
+
+            Item {
+              width: parent.width
+              implicitHeight: sleepLabel.implicitHeight
+              Text {
+                id: sleepLabel
+                textFormat: Text.PlainText
+                text: strings.t("power.sleep")
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+              Text {
+                anchors.right: parent.right
+                textFormat: Text.PlainText
+                text: strings.t("power.sleepValue").arg(sleepSlider.dragging
+                  ? Math.round(sleepSlider.liveValue) : Model.toInt(root.value("sleep"), 10))
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+
+            PanelSlider {
+              id: sleepSlider
+              width: parent.width
+              bar: root.bar
+              minimum: 1
+              maximum: 60
+              step: 1
+              integer: true
+              value: Model.toInt(root.value("sleep"), 10)
+              onReleased: function(v) { root.setValue("sleep", Math.round(v)) }
+              WheelGuard { flickable: flick }
+            }
+
+            Item {
+              width: parent.width
+              implicitHeight: debounceLabel.implicitHeight
+              Text {
+                id: debounceLabel
+                textFormat: Text.PlainText
+                text: strings.t("power.debounce")
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+              Text {
+                anchors.right: parent.right
+                textFormat: Text.PlainText
+                text: strings.t("power.debounceValue").arg(debounceSlider.dragging
+                  ? Math.round(debounceSlider.liveValue) : Model.toInt(root.value("debounce"), 0))
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+
+            PanelSlider {
+              id: debounceSlider
+              width: parent.width
+              bar: root.bar
+              minimum: 0
+              maximum: 20
+              step: 1
+              integer: true
+              value: Model.toInt(root.value("debounce"), 0)
+              onReleased: function(v) { root.setValue("debounce", Math.round(v)) }
+              WheelGuard { flickable: flick }
+            }
+          }
+
 
           PanelSeparator { foreground: root.bar.foreground }
 

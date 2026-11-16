@@ -62,19 +62,21 @@ reboot and apply on any computer you use the mouse with. Pointer acceleration
 and scroll speed are the exceptions. They are Hyprland settings for this
 computer only.
 
+The table lists the settings in the order the panel shows them.
+
 | Setting | Values |
 |---|---|
 | Battery | Percentage and charging state. The bar icon turns the urgent color at or below the low-battery threshold (15% by default). |
 | Active DPI level | One of five levels |
 | DPI of the active level | 50 to 12000, in steps of 50 |
-| Polling rate | 125, 500, or 1000 Hz |
-| Motion Sync, Angle Snapping, Ripple Control | On or off |
 | Pointer acceleration | System default, Flat, or Adaptive |
 | Scroll speed | 0.1× to 3.0× the normal speed, in steps of 0.1. Applies to both wheels. |
 | Thumb wheel speed | 1× to 10× the default horizontal scroll per notch. Stored on the mouse. |
+| Buttons | Middle, right, back, forward, wheel tilt left and right, wheel up and down, and thumb wheel left and right. Left click can't be remapped, so a mistake can't lock you out. |
+| Polling rate | 125, 500, or 1000 Hz |
+| Motion Sync, Angle Snapping, Ripple Control | On or off |
 | Sleep timer | 1 to 60 minutes in the panel |
 | Click debounce | 0 to 20 ms in the panel |
-| Buttons | Middle, right, back, forward, wheel tilt left and right, wheel up and down, and thumb wheel left and right. Left click can't be remapped, so a mistake can't lock you out. |
 | Factory reset | Restores the mouse's defaults. Click the button twice to confirm. |
 
 The thumb wheel speed is stored as the mapping of the two thumb wheel buttons,
