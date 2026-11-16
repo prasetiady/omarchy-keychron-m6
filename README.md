@@ -5,7 +5,7 @@ bar shows the battery level, and the panel changes DPI, polling rate, sensor
 options, buttons, pointer acceleration, and scroll speed.
 
 <p align="center">
-  <img src="preview.png" alt="The Keychron M6 panel open from the Omarchy bar, connected over 2.4 GHz at 96% battery, with the active DPI level, polling rate, Motion Sync, Angle Snapping, and Ripple Control toggles, Flat pointer acceleration, the scroll speed slider, and the sleep and click debounce sliders" width="340">
+  <img src="preview.png" alt="The Keychron M6 panel open from the Omarchy bar, connected over 2.4 GHz at 95% battery. The Pointer section shows the active DPI level and Flat acceleration, the Scrolling section shows a 0.4× scroll speed and a 3× thumb wheel speed, and the Performance section shows the polling rate with the Motion Sync, Angle Snapping, and Ripple Control toggles" width="340">
 </p>
 
 The widget supports only the PixArt 3311 version of the Keychron M6, such as
