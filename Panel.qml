@@ -585,119 +585,6 @@ Panel {
 
           PanelSeparator { foreground: root.bar.foreground }
 
-          // ---------- Buttons ----------
-          // Left click is absent on purpose, so a remap cannot lock you out.
-          Column {
-            width: parent.width
-            spacing: Style.space(8)
-            enabled: root.canConfigure
-            opacity: enabled ? 1 : 0.5
-
-            PanelSectionHeader {
-              textFormat: Text.PlainText
-              text: strings.t("section.buttons")
-              foreground: root.bar.foreground
-              fontFamily: root.bar.fontFamily
-            }
-
-            Text {
-              width: parent.width
-              visible: (root.buttonsData.buttons || []).length === 0
-              textFormat: Text.PlainText
-              text: strings.t("buttons.empty")
-              color: root.bar.foreground
-              opacity: 0.5
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
-
-            Repeater {
-              model: root.buttonsData.buttons || []
-
-              Column {
-                id: buttonRow
-                required property var modelData
-                readonly property bool isShortcut: String(modelData.action) === "shortcut"
-                width: parent.width
-                spacing: Style.space(4)
-
-                Item {
-                  width: parent.width
-                  implicitHeight: Math.max(nameLabel.implicitHeight, actionPicker.implicitHeight)
-
-                  Text {
-                    id: nameLabel
-                    anchors.left: parent.left
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: parent.width * 0.46
-                    textFormat: Text.PlainText
-                    text: Model.plain(buttonRow.modelData.name, 40)
-                    color: root.bar.foreground
-                    font.family: root.bar.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    elide: Text.ElideRight
-
-                    MouseArea {
-                      id: nameMouse
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      acceptedButtons: Qt.NoButton
-                    }
-
-                    PanelToolTip {
-                      visible: nameMouse.containsMouse && Model.plain(buttonRow.modelData.help, 200) !== ""
-                      text: Model.plain(buttonRow.modelData.help, 200)
-                      fontFamily: root.bar.fontFamily
-                    }
-                  }
-
-                  Dropdown {
-                    id: actionPicker
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: parent.width * 0.5
-                    showLabel: false
-                    options: root.buttonsData.actions || []
-                    value: String(buttonRow.modelData.action)
-                    foreground: root.bar.foreground
-                    fontFamily: root.bar.fontFamily
-                    onChanged: function(v) {
-                      if (v === String(buttonRow.modelData.action)) return
-                      // A shortcut is written once there is a key combination
-                      // to store; picking it only opens the field.
-                      if (v === "shortcut") {
-                        shortcutField.visible = true
-                        shortcutField.forceActiveFocus()
-                        return
-                      }
-                      root.run(["buttons", "set", String(buttonRow.modelData.index), v])
-                    }
-                  }
-                }
-
-                TextField {
-                  id: shortcutField
-                  width: parent.width
-                  visible: buttonRow.isShortcut
-                  text: Model.plain(buttonRow.modelData.argument, 64)
-                  placeholderText: strings.t("buttons.shortcutPlaceholder")
-                  foreground: root.bar.foreground
-                  font.family: root.bar.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  onAccepted: {
-                    var combo = Model.normalizeShortcut(text)
-                    if (combo === null) return
-                    root.run(["buttons", "set", String(buttonRow.modelData.index), "shortcut", combo])
-                  }
-                }
-              }
-            }
-          }
-
-
-          PanelSeparator { foreground: root.bar.foreground }
-
           // ---------- Performance: polling rate and sensor ----------
           Column {
             width: parent.width
@@ -843,6 +730,119 @@ Panel {
               value: Model.toInt(root.value("debounce"), 0)
               onReleased: function(v) { root.setValue("debounce", Math.round(v)) }
               WheelGuard { flickable: flick }
+            }
+          }
+
+
+          PanelSeparator { foreground: root.bar.foreground }
+
+          // ---------- Buttons ----------
+          // Left click is absent on purpose, so a remap cannot lock you out.
+          Column {
+            width: parent.width
+            spacing: Style.space(8)
+            enabled: root.canConfigure
+            opacity: enabled ? 1 : 0.5
+
+            PanelSectionHeader {
+              textFormat: Text.PlainText
+              text: strings.t("section.buttons")
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+            }
+
+            Text {
+              width: parent.width
+              visible: (root.buttonsData.buttons || []).length === 0
+              textFormat: Text.PlainText
+              text: strings.t("buttons.empty")
+              color: root.bar.foreground
+              opacity: 0.5
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Repeater {
+              model: root.buttonsData.buttons || []
+
+              Column {
+                id: buttonRow
+                required property var modelData
+                readonly property bool isShortcut: String(modelData.action) === "shortcut"
+                width: parent.width
+                spacing: Style.space(4)
+
+                Item {
+                  width: parent.width
+                  implicitHeight: Math.max(nameLabel.implicitHeight, actionPicker.implicitHeight)
+
+                  Text {
+                    id: nameLabel
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width * 0.46
+                    textFormat: Text.PlainText
+                    text: Model.plain(buttonRow.modelData.name, 40)
+                    color: root.bar.foreground
+                    font.family: root.bar.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    elide: Text.ElideRight
+
+                    MouseArea {
+                      id: nameMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      acceptedButtons: Qt.NoButton
+                    }
+
+                    PanelToolTip {
+                      visible: nameMouse.containsMouse && Model.plain(buttonRow.modelData.help, 200) !== ""
+                      text: Model.plain(buttonRow.modelData.help, 200)
+                      fontFamily: root.bar.fontFamily
+                    }
+                  }
+
+                  Dropdown {
+                    id: actionPicker
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width * 0.5
+                    showLabel: false
+                    options: root.buttonsData.actions || []
+                    value: String(buttonRow.modelData.action)
+                    foreground: root.bar.foreground
+                    fontFamily: root.bar.fontFamily
+                    onChanged: function(v) {
+                      if (v === String(buttonRow.modelData.action)) return
+                      // A shortcut is written once there is a key combination
+                      // to store; picking it only opens the field.
+                      if (v === "shortcut") {
+                        shortcutField.visible = true
+                        shortcutField.forceActiveFocus()
+                        return
+                      }
+                      root.run(["buttons", "set", String(buttonRow.modelData.index), v])
+                    }
+                  }
+                }
+
+                TextField {
+                  id: shortcutField
+                  width: parent.width
+                  visible: buttonRow.isShortcut
+                  text: Model.plain(buttonRow.modelData.argument, 64)
+                  placeholderText: strings.t("buttons.shortcutPlaceholder")
+                  foreground: root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  onAccepted: {
+                    var combo = Model.normalizeShortcut(text)
+                    if (combo === null) return
+                    root.run(["buttons", "set", String(buttonRow.modelData.index), "shortcut", combo])
+                  }
+                }
+              }
             }
           }
 
