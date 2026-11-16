@@ -2,8 +2,7 @@
 
 An [Omarchy](https://omarchy.org/) bar widget for the Keychron M6 mouse. The
 bar shows the battery level, and the panel changes DPI, polling rate, sensor
-options, buttons, and pointer acceleration. You don't need the Keychron
-Launcher web app.
+options, buttons, and pointer acceleration.
 
 <p align="center">
   <img src="preview.png" alt="The Keychron M6 panel open from the Omarchy bar, connected over 2.4 GHz at 97% battery, with the active DPI level, polling rate, Motion Sync, Angle Snapping, and Ripple Control toggles, Flat pointer acceleration, and the sleep and click debounce sliders" width="340">
@@ -26,8 +25,8 @@ a PixArt 3311 sensor, polls at up to 1000 Hz, and has the USB ID `3434:d064`.
    omarchy plugin add https://github.com/prasetiady/omarchy-keychron-m6.git --enable
    ```
 
-2. Install the udev rule, so your user can open the mouse's HID nodes. The
-   plugin never writes system files itself, so this step needs `sudo`:
+2. Install the udev rule, so your user can open the mouse's HID nodes. This
+   step needs `sudo`:
 
    ```bash
    cd ~/.config/omarchy/plugins/keychron-m6.panel
@@ -137,30 +136,17 @@ Exit codes: `0` on success, `1` for an invalid value or when the mouse stores a
 different value than the one sent, `2` for an unknown command, `3` when the udev
 rule is missing, and `4` when the mouse doesn't answer.
 
-## About the protocol
+## How it works
 
-The M6 doesn't support HID++, so Solaar can't configure it. The mouse uses
-Keychron's own vendor protocol on HID usage page `0xFFC1`. Commands go out on
-output reports `0xB3` and `0xB5`, and replies come back on input reports
-`0xB4` and `0xB6`. The Keychron Launcher uses the same protocol through WebHID.
-The receiver passes the same frames to the mouse, so one code path covers the
-receiver and the cable.
+`keychron-ctl` talks to the mouse over its vendor HID channel, usage page
+`0xFFC1`. It sends commands on output reports `0xB3` and `0xB5` and reads
+replies on input reports `0xB4` and `0xB6`. The receiver forwards the same
+commands to the mouse, so the receiver and the cable share one code path.
+After every write, `keychron-ctl` reads the setting back, so the panel shows
+what the mouse stored.
 
-`keychron-ctl` is the only part of the plugin that opens the device. It uses
-the Python 3 standard library and nothing else. Every write is followed by a
-read, so the panel shows what the mouse stored, not what it asked for.
-
-Keychron's definition for the PixArt 3311 version of the M6 marks Motion
-Sync, Angle Snapping, and Ripple Control as unsupported, and the Launcher hides
-them. The M6S-A72 firmware (1.0.2) still stores all three: each one turns on
-and off and reads back correctly. The panel shows the toggles only when the
-mouse reports them.
-
-Pointer acceleration lives in Hyprland, not in the mouse. The panel writes your
-choice as plain text to `~/.local/state/keychron-m6/`. `hypr/accel.lua` reads
-that file, checks each value against a fixed pattern, and then calls
-`hl.device`. It never runs the file as Lua, because device names come from USB
-and Bluetooth descriptors.
+Pointer acceleration is stored in `~/.local/state/keychron-m6/` as plain text.
+`hypr/accel.lua` validates each value before it calls `hl.device`.
 
 ## Work on the widget
 
@@ -211,12 +197,9 @@ the mouse first if you remapped buttons.
 
 ## Credits
 
-The protocol details come from the Keychron Launcher's client code. These
-projects helped:
+The protocol details come from Keychron's own client code, with help from
+these projects:
 
 - [keychron-battery-dkms](https://github.com/csutcliff/keychron-battery-dkms)
 - [chron-tui](https://github.com/kubastick/chron-tui)
 - [Darmoshark M3 protocol notes](https://github.com/Barba2k2/darmoshark-m3-configurator/blob/main/PROTOCOL.md)
-
-The widget layout follows
-[omarchy-mx-master](https://github.com/gastonmira/omarchy-mx-master).
