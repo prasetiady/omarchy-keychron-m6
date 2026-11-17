@@ -52,8 +52,9 @@ the widget ignores them.
    starts, so both settings survive a reboot. Without this line, the
    **Acceleration** and **Scroll speed** settings in the panel have no effect.
 
-To show only the mouse icon in the bar, right-click it. Right-click again to
-bring the battery percentage back.
+The bar shows the mouse icon. It turns the urgent color when the battery is
+low, and hovering it shows the battery percentage. To show the percentage next
+to the icon, right-click it. Right-click again to hide it.
 
 ## What the panel controls
 

@@ -25,7 +25,7 @@
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "showPercentage": true,
+      "showPercentage": false,
       "lowBatteryThreshold": 15,
       "refreshIntervalSec": 300
     },
@@ -34,7 +34,7 @@
         "key": "showPercentage",
         "type": "boolean",
         "label": "Show battery percentage in bar",
-        "defaultValue": true,
+        "defaultValue": false,
         "description": "Right-clicking the bar icon toggles this too."
       },
       {

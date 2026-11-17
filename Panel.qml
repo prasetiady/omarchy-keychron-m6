@@ -30,7 +30,7 @@ Panel {
   // Bar widgets get `bar`, `moduleName`, and `settings` from the host but not
   // their manifest, so the helper is found relative to this file.
   readonly property string ctl: String(Qt.resolvedUrl("keychron-ctl")).replace("file://", "")
-  readonly property bool showPercentage: setting("showPercentage", true) === true
+  readonly property bool showPercentage: setting("showPercentage", false) === true
   readonly property int lowThreshold: setting("lowBatteryThreshold", 15)
   readonly property int refreshIntervalSec: setting("refreshIntervalSec", 300)
 
