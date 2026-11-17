@@ -12,6 +12,9 @@ Omarchy bar widget for the Keychron M6, PixArt 3311 version only (USB ID
 - `hypr/pointer.lua`: applies acceleration and scroll speed from
   `~/.local/state/keychron-m6/`.
 - `70-keychron-m6.rules`: the udev rule users install by hand.
+- `.local/` (gitignored): the Keychron Launcher bundle and hardware tools.
+  `.local/README.md` lists them. Reach for it before downloading or writing a
+  probe script.
 - `tests/run`: the whole suite. `tests/test_structure.py` enforces the
   mechanical conventions (a `WheelGuard` on every slider, plain-text QML, UI
   strings in sync with `i18n/en.json`, matching Hyprland name lists, udev rule
@@ -30,12 +33,13 @@ Omarchy bar widget for the Keychron M6, PixArt 3311 version only (USB ID
 
 ## Protocol
 
-- The source is the Keychron Launcher's `main.js` (launcher.keychron.com). The
-  M6 uses its "8k" protocol classes. Find a command by searching for
-  `write(181,` (report `0xB5`) or `write(179,` (report `0xB3`). Opcodes from
-  third-party notes for other Keychron mice can be wrong here: button read and
-  write are `0x62` and `0x52`.
-- `E4 07 <op>` means the firmware lacks the command. Firmware 1.0.2 lacks
+- The source is the Keychron Launcher bundle at `.local/launcher/main.js`
+  (refresh with `.local/launcher/fetch.sh`). The M6 uses its "8k" protocol
+  classes. Find a command by searching for `write(181,` (report `0xB5`) or
+  `write(179,` (report `0xB3`). Opcodes from third-party notes for other
+  Keychron mice can be wrong here: button read and write are `0x62` and `0x52`.
+- Probe an opcode with `.local/tools/kc-request.py` before adding it.
+  `E4 07 <op>` means the firmware lacks the command. Firmware 1.0.2 lacks
   scroll guard (`0x6A`) and has no newer release.
 - Over Bluetooth the M6 has no vendor page `0xFFC1`, so only the battery
   (UPower) and the Hyprland settings work there.
@@ -44,6 +48,9 @@ Omarchy bar widget for the Keychron M6, PixArt 3311 version only (USB ID
 
 - `./keychron-ctl probe` prints raw replies; `./keychron-ctl status` prints the
   decoded state. Settings need the receiver or the cable.
+- Confirm a polling rate or scroll step from the mouse's own reports with
+  `.local/tools/report-rate.py` and `.local/tools/scroll-values.py`. They read
+  the root-only pointer node; `.local/README.md` has the one-line grant.
 - Note the user's values first, and restore them after a write test.
 - A plugin folder symlinked into `~/.config/omarchy/plugins/` does not
   hot-reload. Run `omarchy restart shell` after a QML or `Model.js` edit.
