@@ -284,6 +284,112 @@ class ThumbWheelTest(CtlTestCase):
         self.assertEqual(self.ctl.decode_key(1, [0, 0, 2]), ("scroll-right", ""))
 
 
+class RestoreTest(CtlTestCase):
+    """Settings written through keychron-ctl are saved, and restored on drift."""
+
+    def mouse(self):
+        state = {"rate_level": 2, "buttons": {}}
+
+        def handler(rid, payload):
+            op = payload[0]
+            if op == 0x03:
+                return [bond_reply()]
+            if op == 0x06:
+                return [[REPLY_LONG] + list(snapshot(rate_level=state["rate_level"]))]
+            if op == 0x41:
+                state["rate_level"] = payload[1]
+                return [[REPLY_SHORT, 0xE4, 0, op] + [0] * 17]
+            if op == 0x0F:
+                return [[REPLY_SHORT, 0xE4, 0, op] + [0] * 17]
+            if op == 0x62:
+                kind, data = state["buttons"].get(payload[1], (0, [0, 0, 0]))
+                return [[REPLY_LONG, 0x62, payload[1], 0, kind] + data + [0] * 56]
+            if op == 0x52:
+                state["buttons"][payload[1]] = (payload[3], list(payload[4:7]))
+                return [[REPLY_SHORT, 0xE4, 0, 0x52] + [0] * 17]
+            return []
+
+        self.add_node("hidraw8", 3, 0x3434, 0xD029)
+        self.attach(FakeMouse(handler))
+        return state
+
+    def saved(self):
+        try:
+            with open(os.path.join(os.environ["KEYCHRON_STATE_DIR"], "mouse-settings")) as f:
+                return f.read().splitlines()
+        except FileNotFoundError:
+            return []
+
+    def test_writes_are_saved(self):
+        self.mouse()
+        self.assertEqual(run(self.ctl, "set", "hscroll", "3")[0], 0)
+        self.assertEqual(run(self.ctl, "set", "rate", "500")[0], 0)
+        self.assertEqual(run(self.ctl, "buttons", "set", "3", "volume-up")[0], 0)
+        self.assertEqual(self.saved(), ["button-3 volume-up", "hscroll 3", "rate 500"])
+        self.assertEqual(pairs(run(self.ctl, "status")[1])["drift"], "")
+
+    def test_dpi_active_is_not_saved(self):
+        self.mouse()
+        with mock.patch.object(self.ctl, "apply_setting", return_value=(1, None)):
+            self.assertEqual(run(self.ctl, "set", "dpi-active", "1")[0], 0)
+        self.assertEqual(self.saved(), [])
+
+    def test_a_lost_thumb_wheel_speed_is_restored(self):
+        state = self.mouse()
+        run(self.ctl, "set", "hscroll", "3")
+        run(self.ctl, "set", "rate", "500")
+        run(self.ctl, "buttons", "set", "3", "mute")
+        # The mouse comes back with factory mappings and another rate.
+        state["buttons"].clear()
+        state["rate_level"] = 2
+        self.assertEqual(pairs(run(self.ctl, "status")[1])["drift"], "rate,hscroll,button-3")
+        code, out = run(self.ctl, "restore")
+        self.assertEqual(code, 0)
+        self.assertEqual(pairs(out), {"rate": "restored", "hscroll": "restored", "button-3": "restored"})
+        got = pairs(run(self.ctl, "status")[1])
+        self.assertEqual((got["drift"], got["hscroll"], got["rate"]), ("", "3", "500"))
+        self.assertEqual(run(self.ctl, "restore"), (0, ""))
+        with open(os.path.join(os.environ["KEYCHRON_STATE_DIR"], "writes.log")) as f:
+            self.assertIn(" restore rate=restored hscroll=restored button-3=restored exit=0", f.read())
+
+    def test_thumb_wheel_speed_and_its_buttons_replace_each_other(self):
+        self.mouse()
+        run(self.ctl, "set", "hscroll", "3")
+        run(self.ctl, "buttons", "set", "10", "volume-up")
+        self.assertEqual(self.saved(), ["button-10 volume-up"])
+        run(self.ctl, "set", "hscroll", "2")
+        self.assertEqual(self.saved(), ["hscroll 2"])
+
+    def test_a_default_button_is_not_kept(self):
+        self.mouse()
+        run(self.ctl, "buttons", "set", "3", "mute")
+        run(self.ctl, "buttons", "set", "3", "default")
+        self.assertEqual(self.saved(), [])
+
+    def test_reset_forgets_the_saved_settings(self):
+        self.mouse()
+        run(self.ctl, "set", "hscroll", "3")
+        with mock.patch.object(self.ctl, "write_hypr"):
+            self.assertEqual(run(self.ctl, "reset")[0], 0)
+        self.assertEqual(self.saved(), [])
+
+    def test_writes_are_logged_and_reads_are_not(self):
+        self.mouse()
+        run(self.ctl, "set", "hscroll", "3")
+        run(self.ctl, "status")
+        run(self.ctl, "buttons", "get")
+        run(self.ctl, "buttons", "set", "3", "mute")
+        with open(os.path.join(os.environ["KEYCHRON_STATE_DIR"], "writes.log")) as f:
+            lines = [line.split(" ", 1)[1] for line in f.read().splitlines()]
+        self.assertEqual(lines, ["set hscroll 3 exit=0", "buttons set 3 mute exit=0"])
+
+    def test_invalid_saved_lines_are_dropped(self):
+        os.makedirs(os.environ["KEYCHRON_STATE_DIR"])
+        with open(os.path.join(os.environ["KEYCHRON_STATE_DIR"], "mouse-settings"), "w") as f:
+            f.write("hscroll 99\nrate 500\nbutton-0 right\nbutton-3 os.exit\nbogus 1\nsleep 5\n")
+        self.assertEqual(self.ctl.read_saved(), {"rate": "500", "sleep": "5"})
+
+
 class StatusTest(CtlTestCase):
     def test_receiver_status(self):
         self.add_node("hidraw8", 3, 0x3434, 0xD029)

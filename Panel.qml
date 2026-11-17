@@ -9,8 +9,10 @@ import "Model.js" as Model
 // Everything routes through `keychron-ctl`, which speaks the mouse's vendor HID
 // protocol through the 2.4 GHz receiver, the USB cable, or Bluetooth. Mouse
 // settings land in the mouse's onboard memory, so the panel is a view over
-// device state, not a store of its own. The one exception is pointer
-// acceleration, which is a Hyprland setting for this computer.
+// device state. keychron-ctl also saves each setting it writes, and when a
+// status poll reports `drift` (the mouse lost a saved setting, as a button
+// mapping can after a power loss) the panel runs `restore`. Pointer
+// acceleration and scroll speed are Hyprland settings for this computer.
 Panel {
   id: root
   moduleName: "keychron-m6.panel"
@@ -80,10 +82,23 @@ Panel {
   property var writeQueue: []
   property bool buttonsDirty: false
 
+  // When the last restore was queued. A setting the mouse refuses keeps
+  // drifting, so wait before trying again instead of looping with the poll.
+  property real lastRestore: 0
+  readonly property int restoreCooldownMs: 60000
+
+  function restoreDrift(drift) {
+    if (!drift || Date.now() - root.lastRestore < root.restoreCooldownMs) return
+    if (root.writeQueue.some(function(job) { return job[0] === "restore" })) return
+    root.lastRestore = Date.now()
+    root.run(["restore"])
+  }
+
   function run(args, overlay) {
     if (overlay) root.pending = Object.assign({}, root.pending, overlay)
     // The thumb wheel speed is stored as two button mappings.
-    if (args[0] === "buttons" || args[0] === "reset" || args[1] === "hscroll") root.buttonsDirty = true
+    if (args[0] === "buttons" || args[0] === "reset" || args[0] === "restore" || args[1] === "hscroll")
+      root.buttonsDirty = true
     root.writeQueue = root.writeQueue.concat([args])
     root.drainQueue()
   }
@@ -150,6 +165,7 @@ Panel {
           root.status = parsed
         root.pending = ({})
         root.everLoaded = true
+        if (parsed.link === "ok") root.restoreDrift(parsed.drift)
       }
     }
   }
@@ -175,26 +191,24 @@ Panel {
       }
       // Read back rather than trusting the write: the panel should show what
       // the mouse actually stored.
-      var withButtons = root.buttonsDirty
+      // A closed panel skips the button list; opening it reads the list again.
+      var withButtons = root.buttonsDirty && root.opened
       root.buttonsDirty = false
       Qt.callLater(function() { root.refresh(withButtons) })
     }
   }
 
-  // Background poll keeps the bar percentage and the low-battery tint honest
-  // while the panel is closed.
+  // One poll: every 10 s while the panel is open, so the controls follow the
+  // mouse, and at the configured background interval while it is closed, so
+  // the bar percentage and low-battery tint stay honest. A lost setting is
+  // restored at whichever poll sees the drift.
+  readonly property int pollMs: root.opened ? 10000 : root.refreshIntervalSec * 1000
+
   Timer {
-    interval: root.refreshIntervalSec * 1000
+    interval: root.pollMs
     running: true
     repeat: true
     triggeredOnStart: true
-    onTriggered: if (!root.opened) root.refresh(false)
-  }
-
-  Timer {
-    interval: 10000
-    running: root.opened
-    repeat: true
     onTriggered: root.refresh(false)
   }
 

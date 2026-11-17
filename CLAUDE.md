@@ -24,6 +24,12 @@ Omarchy bar widget for the Keychron M6, PixArt 3311 version only (USB ID
 
 - **Read-back:** every write to the mouse reads the value back and exits `1`
   on a mismatch. The panel shows what the mouse stored, not what was sent.
+- **Saved settings:** `set` and `buttons set` save each mouse setting to
+  `~/.local/state/keychron-m6/mouse-settings`. `status` reports `drift`, and
+  the panel runs `restore`, because the mouse can lose a button mapping (and
+  so the thumb wheel speed) on power loss. A new mouse setting joins
+  `SAVED_KEYS`; `dpi-active` stays out because the mouse's DPI button changes
+  it.
 - **Data, not code:** Hyprland settings are plain words in
   `~/.local/state/keychron-m6/`, validated in `pointer.lua`. Device names come
   from USB and Bluetooth descriptors, so nothing from them ever runs as Lua.

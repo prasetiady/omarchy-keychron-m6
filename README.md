@@ -58,10 +58,14 @@ to the icon, right-click it. Right-click again to hide it.
 
 ## What the panel controls
 
-Most settings are stored in the mouse's onboard memory. They stay after a
-reboot and apply on any computer you use the mouse with. Pointer acceleration
-and scroll speed are the exceptions. They are Hyprland settings for this
-computer only.
+Most settings are stored in the mouse's onboard memory and apply on any
+computer you use the mouse with. Pointer acceleration and scroll speed are the
+exceptions. They are Hyprland settings for this computer only.
+
+The mouse can lose a button mapping, and with it the thumb wheel speed, when
+it loses power. So the widget also keeps a copy of each mouse setting you
+change. When the mouse comes back without one, the widget writes it again. The
+active DPI level is not kept, because the DPI button on the mouse changes it.
 
 The table lists the settings in the order the panel shows them.
 
@@ -127,7 +131,8 @@ cd ~/.config/omarchy/plugins/keychron-m6.panel
 | `keychron-ctl set <setting> <value>` | Writes one setting, then reads it back from the mouse |
 | `keychron-ctl buttons get` | Prints the button mappings as JSON |
 | `keychron-ctl buttons set <index> <action> [<shortcut>]` | Remaps one button |
-| `keychron-ctl reset` | Restores the mouse's factory defaults and clears the acceleration and scroll speed settings |
+| `keychron-ctl restore` | Writes back each saved setting that the mouse no longer holds, and prints one `key=restored` or `key=failed` line for each |
+| `keychron-ctl reset` | Restores the mouse's factory defaults and clears the saved settings, the acceleration, and the scroll speed |
 | `keychron-ctl probe` | Prints the raw replies from each Keychron device. Attach the output to a bug report. |
 
 Settings for `set`:
@@ -168,6 +173,18 @@ replies on input reports `0xB4` and `0xB6`. The receiver forwards the same
 commands to the mouse, so the receiver and the cable share one code path.
 After every write, `keychron-ctl` reads the setting back, so the panel shows
 what the mouse stored.
+
+`set` and `buttons set` also save each mouse setting to
+`~/.local/state/keychron-m6/mouse-settings`, one `key value` line each.
+`status` prints `drift=` with the saved keys that the mouse no longer holds.
+When that list isn't empty, the panel runs `restore`, at most once a minute.
+The panel polls every 10 seconds while it is open, and at the
+`refreshIntervalSec` setting (300 seconds by default) while it is closed. A
+lost setting comes back at the next poll, or as soon as you open the panel.
+
+Each command that writes to the mouse adds a line with the time, the command,
+and its exit code to `~/.local/state/keychron-m6/writes.log`. To find out what
+changed a setting, read that file.
 
 Pointer acceleration and scroll speed are stored in
 `~/.local/state/keychron-m6/` as plain text. `hypr/pointer.lua` validates each

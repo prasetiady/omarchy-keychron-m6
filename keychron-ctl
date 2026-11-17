@@ -17,8 +17,13 @@ Usage:
   keychron-ctl set <setting> <value>
   keychron-ctl buttons get
   keychron-ctl buttons set <index> <action> [<argument>]
+  keychron-ctl restore
   keychron-ctl reset
   keychron-ctl probe
+
+`set` and `buttons set` also save each mouse setting under
+~/.local/state/keychron-m6/mouse-settings. `status` prints `drift=` with the
+saved keys the mouse no longer holds, and `restore` writes those back.
 """
 
 import errno
@@ -493,6 +498,62 @@ def _atomic_write(path, text):
     os.replace(tmp, path)
 
 
+# Mouse settings the widget wrote, kept so `restore` can write them again when
+# the mouse comes back without them. The firmware keeps the snapshot settings
+# across power loss, but a button mapping (and so the thumb wheel speed) can
+# fall back to the factory value. One `key value` line each, validated on read.
+SAVED_FILE = "mouse-settings"
+# dpi-active is left out: the DPI button on the mouse changes it.
+SAVED_KEYS = ("dpi-levels", "rate", "ripple", "angle-snap", "motion-sync",
+              "scroll-reverse", "debounce", "sleep", "hscroll")
+SAVED_MAX = 4096
+
+
+def read_saved():
+    """The saved settings as {key: text}; unknown or invalid lines are dropped."""
+    try:
+        text = _read(state_path(SAVED_FILE), SAVED_MAX)
+    except OSError:
+        return {}
+    saved = {}
+    for line in text.splitlines()[:64]:
+        key, _, value = line.strip().partition(" ")
+        try:
+            if key in SAVED_KEYS:
+                parse_setting(key, value)
+            elif key.startswith("button-"):
+                index = parse_int(key[7:], 0, 31, "button index")
+                action, _, arg = value.partition(" ")
+                if index not in BUTTON_INDEXES:
+                    continue
+                encode_action(action, arg)
+            else:
+                continue
+        except SystemExit:
+            continue
+        saved[key] = value
+    return saved
+
+
+def update_saved(changes):
+    """Merge {key: text or None} into the saved settings; None removes a key."""
+    saved = read_saved()
+    for key, value in changes.items():
+        if value is None:
+            saved.pop(key, None)
+        else:
+            saved[key] = value
+    os.makedirs(STATE_DIR, exist_ok=True)
+    _atomic_write(state_path(SAVED_FILE), "".join("%s %s\n" % kv for kv in sorted(saved.items())))
+
+
+def saved_text(key, value):
+    """A parsed setting value in the form the saved file and `set` take."""
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(v) for v in value)
+    return str(value)
+
+
 # ---------------------------------------------------------------- UPower (Bluetooth)
 
 def upower_battery():
@@ -589,6 +650,7 @@ def cmd_status():
                     step = read_hscroll(dev)
                     # None means the thumb wheel is remapped to another action.
                     extra = [("hscroll", step if step is not None else "custom")]
+                    extra.append(("drift", drifted(dev, snap, info, read_saved(), step)))
                 except NoReply:
                     extra = []
         except AccessDenied:
@@ -760,6 +822,23 @@ def setting_payload(key, want, snap, info):
     return [OP_SLEEP, 1, want]
 
 
+def apply_setting(dev, key, want, snap, info):
+    """Write one mouse setting and read it back; return (stored value, snapshot)."""
+    if key == "hscroll":
+        write_hscroll(dev, want)
+        return read_hscroll(dev), snap
+    dev.command(REPORT_SHORT, setting_payload(key, want, snap, info))
+    # Read back: the panel and scripts must see what the mouse stored. The
+    # receiver forwards a write a little later, so give it a few tries.
+    for _ in range(READBACK_TRIES):
+        snap = get_snapshot(dev)
+        got = stored_setting(key, snap, info)
+        if got == want:
+            break
+        time.sleep(0.1)
+    return got, snap
+
+
 def cmd_set(key, value):
     if key in HYPR_FILES:
         write_hypr({key: parse_hypr(key, value)})
@@ -767,26 +846,70 @@ def cmd_set(key, value):
 
     want = parse_setting(key, value)
     dev, snap = open_mouse()
-    if key == "hscroll":
-        with dev:
-            write_hscroll(dev, want)
-            got = read_hscroll(dev)
-        if got == want:
-            return 0
-        print("keychron-ctl: the thumb wheel stored %s, not %s" % (got or "custom", want), file=sys.stderr)
-        return 1
     with dev:
         info = get_info(dev)
-        dev.command(REPORT_SHORT, setting_payload(key, want, snap, info))
-        # Read back: the panel and scripts must see what the mouse stored. The
-        # receiver forwards a write a little later, so give it a few tries.
-        for _ in range(READBACK_TRIES):
-            got = stored_setting(key, get_snapshot(dev), info)
-            if got == want:
-                return 0
-            time.sleep(0.1)
-    print("keychron-ctl: the mouse stored %s=%s, not %s" % (key, got, want), file=sys.stderr)
-    return 1
+        got, snap = apply_setting(dev, key, want, snap, info)
+    if got != want:
+        if key == "hscroll":
+            print("keychron-ctl: the thumb wheel stored %s, not %s" % (got or "custom", want), file=sys.stderr)
+        else:
+            print("keychron-ctl: the mouse stored %s=%s, not %s" % (key, got, want), file=sys.stderr)
+        return 1
+    if key == "dpi":
+        update_saved({"dpi-levels": saved_text(key, snap["dpi_levels"])})
+    elif key == "hscroll":
+        # The thumb wheel is buttons 10 and 11; one saved value owns them.
+        update_saved({key: saved_text(key, want), "button-%d" % THUMB_RIGHT: None,
+                      "button-%d" % THUMB_LEFT: None})
+    elif key in SAVED_KEYS:
+        update_saved({key: saved_text(key, want)})
+    return 0
+
+
+def drifted(dev, snap, info, saved, hscroll):
+    """Saved keys whose value on the mouse differs from the saved one."""
+    keys = []
+    for key in SAVED_KEYS:
+        if key not in saved:
+            continue
+        want = parse_setting(key, saved[key])
+        got = hscroll if key == "hscroll" else stored_setting(key, snap, info)
+        if got != want:
+            keys.append(key)
+    for key in sorted(k for k in saved if k.startswith("button-")):
+        index = int(key[7:])
+        action, _, arg = saved[key].partition(" ")
+        if read_button(dev, index) != expected_button(action, arg):
+            keys.append(key)
+    return keys
+
+
+def cmd_restore():
+    """Write back every saved setting the mouse lost; print the keys it fixed."""
+    saved = read_saved()
+    if not saved:
+        return 0
+    dev, snap = open_mouse()
+    failed = []
+    with dev:
+        info = get_info(dev)
+        hscroll = read_hscroll(dev) if "hscroll" in saved else None
+        for key in drifted(dev, snap, info, saved, hscroll):
+            if key.startswith("button-"):
+                action, _, arg = saved[key].partition(" ")
+                ok = write_button(dev, int(key[7:]), action, arg)[0]
+            else:
+                want = parse_setting(key, saved[key])
+                try:
+                    got, snap = apply_setting(dev, key, want, snap, info)
+                except SystemExit:
+                    got = None  # The mouse no longer offers this value.
+                ok = got == want
+            print("%s=%s" % (key, "restored" if ok else "failed"))
+            LOG_DETAIL.append("%s=%s" % (key, "restored" if ok else "failed"))
+            if not ok:
+                failed.append(key)
+    return 1 if failed else 0
 
 
 # ---------------------------------------------------------------- buttons
@@ -1002,23 +1125,47 @@ def cmd_buttons_set(index, action, arg):
     index = parse_int(index, 0, 31, "button index")
     if index not in BUTTON_INDEXES:
         raise SystemExit("keychron-ctl: button %d cannot be remapped" % index)
-    kind, data = encode_action(action, arg)
+    encode_action(action, arg)
     dev, _ = open_mouse()
     with dev:
-        dev.command(REPORT_LONG, [OP_KEY_SET, index, 0, kind] + data)
-        got, got_arg = read_button(dev, index)
-    want_arg = format_shortcut(*data) if action == "shortcut" else ""
-    if (got, got_arg) != (action, want_arg) and not (action == "default" and got == "other"):
-        print("keychron-ctl: the mouse stored %s %s, not %s %s" % (got, got_arg, action, want_arg),
+        ok, (got, got_arg) = write_button(dev, index, action, arg)
+    if not ok:
+        want, want_arg = expected_button(action, arg)
+        print("keychron-ctl: the mouse stored %s %s, not %s %s" % (got, got_arg, want, want_arg),
               file=sys.stderr)
         return 1
+    changes = {"button-%d" % index: None if action == "default" else
+               ("%s %s" % (action, got_arg) if got_arg else action)}
+    if index in (THUMB_RIGHT, THUMB_LEFT):
+        changes["hscroll"] = None  # The thumb wheel now has its own mapping.
+    update_saved(changes)
     return 0
+
+
+def expected_button(action, arg):
+    """What read_button returns once `action` is stored."""
+    kind, data = encode_action(action, arg)
+    if action == "default":
+        return "default", ""
+    return action, format_shortcut(*data) if action == "shortcut" else ""
+
+
+def write_button(dev, index, action, arg):
+    """Store one button mapping and read it back; return (kept, what it read)."""
+    kind, data = encode_action(action, arg)
+    dev.command(REPORT_LONG, [OP_KEY_SET, index, 0, kind] + data)
+    got = read_button(dev, index)
+    return got == expected_button(action, arg) or (action == "default" and got[0] == "other"), got
 
 
 def cmd_reset():
     dev, _ = open_mouse()
     with dev:
         dev.command(REPORT_SHORT, [OP_RESET, 0xFF], timeout=3.0)
+    try:
+        os.remove(state_path(SAVED_FILE))
+    except FileNotFoundError:
+        pass
     try:
         write_hypr({key: "default" for key in HYPR_FILES})
     except (OSError, subprocess.SubprocessError):
@@ -1072,9 +1219,49 @@ def cmd_probe():
     return 0
 
 
+# Every command that writes to the mouse, with its exit code, so a setting
+# that changed by surprise can be traced to a write or ruled out.
+LOG_FILE = "writes.log"
+LOG_MAX = 32768
+WRITE_COMMANDS = ("set", "buttons set", "restore", "reset")
+# What a command did beyond its arguments, such as the keys restore wrote.
+LOG_DETAIL = []
+
+
+def log_write(argv, code):
+    line = "%s %s exit=%s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                 " ".join([a[:64] for a in argv[1:6]] + LOG_DETAIL), code)
+    path = state_path(LOG_FILE)
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        try:
+            old = _read(path, LOG_MAX)
+        except OSError:
+            old = ""
+        if len(old) + len(line) > LOG_MAX:
+            old = old[len(old) // 2:].partition("\n")[2]
+        _atomic_write(path, old + line)
+    except OSError:
+        pass
+
+
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else "status"
     lockfd = lock()
+    code = 2
+    try:
+        code = dispatch(argv, cmd)
+        return code
+    except SystemExit as e:
+        code = e.code
+        raise
+    finally:
+        if cmd in WRITE_COMMANDS or " ".join(argv[1:3]) in WRITE_COMMANDS:
+            log_write(argv, code)
+        os.close(lockfd)
+
+
+def dispatch(argv, cmd):
     try:
         if cmd == "status":
             return cmd_status()
@@ -1084,6 +1271,8 @@ def main(argv):
             return cmd_buttons_get()
         if cmd == "buttons" and len(argv) in (5, 6) and argv[2] == "set":
             return cmd_buttons_set(argv[3], argv[4], argv[5] if len(argv) == 6 else "")
+        if cmd == "restore":
+            return cmd_restore()
         if cmd == "reset":
             return cmd_reset()
         if cmd == "probe":
@@ -1099,8 +1288,6 @@ def main(argv):
     except Refused:
         print("keychron-ctl: the mouse refused the write", file=sys.stderr)
         return 1
-    finally:
-        os.close(lockfd)
 
 
 if __name__ == "__main__":
