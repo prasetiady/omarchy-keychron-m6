@@ -67,7 +67,7 @@ The table lists the settings in the order the panel shows them.
 
 | Setting | Values |
 |---|---|
-| Battery | Percentage and charging state. The bar icon turns the urgent color at or below the low-battery threshold (15% by default). |
+| Battery | Percentage and charging state. The bar icon turns the theme's urgent color (usually red) at or below the low-battery threshold, 20% by default. |
 | Active DPI level | One of five levels |
 | DPI of the active level | 50 to 12000, in steps of 50 |
 | Pointer acceleration | System default, Flat, or Adaptive |

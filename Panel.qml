@@ -31,7 +31,7 @@ Panel {
   // their manifest, so the helper is found relative to this file.
   readonly property string ctl: String(Qt.resolvedUrl("keychron-ctl")).replace("file://", "")
   readonly property bool showPercentage: setting("showPercentage", false) === true
-  readonly property int lowThreshold: setting("lowBatteryThreshold", 15)
+  readonly property int lowThreshold: setting("lowBatteryThreshold", 20)
   readonly property int refreshIntervalSec: setting("refreshIntervalSec", 300)
 
   readonly property bool present: Model.isPresent(root.status)
